@@ -1,5 +1,4 @@
 import asyncio
-import itertools
 import os
 import sys
 from collections.abc import AsyncGenerator
@@ -32,9 +31,8 @@ DatetimeLike: TypeAlias = str | date | datetime | pd.Timestamp
 
 
 def _chunked(it: list, n: int):
-    it_ = iter(it)
-    while chunk := list(itertools.islice(it_, n)):
-        yield chunk
+    for i in range(0, len(it), n):
+        yield it[i : i + n]
 
 
 def _is_retryable(exc: BaseException) -> bool:

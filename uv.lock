@@ -46,16 +46,11 @@ dependencies = [
     { name = "tenacity" },
 ]
 
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
     { name = "pre-commit" },
+    { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-httpx" },
     { name = "ruff" },
@@ -66,16 +61,14 @@ requires-dist = [
     { name = "aiolimiter", specifier = ">=1.1.0" },
     { name = "httpx", specifier = ">=0.23.0" },
     { name = "pandas", specifier = ">=2.2.0" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "tenacity", specifier = ">=8.2.0" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy" },
     { name = "pre-commit" },
+    { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-httpx" },
     { name = "ruff" },

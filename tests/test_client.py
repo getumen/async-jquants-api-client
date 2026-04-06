@@ -1,0 +1,879 @@
+import os
+from datetime import datetime
+from typing import Any
+from unittest.mock import patch
+
+import pandas as pd
+import pytest
+from pytest_httpx import HTTPXMock
+
+from async_jquants_api_client import JQuantsAPIError, JQuantsAuthError, JQuantsClient
+from async_jquants_api_client.client import _aggregate_bars_n_minute
+from async_jquants_api_client.constants import FIN_SUMMARY_COLUMNS_V2
+
+
+def test_client_init(client: JQuantsClient) -> None:
+    assert client is not None
+
+
+# ------------------------------------------------------------------
+# 設定読み込みの優先順位
+# ------------------------------------------------------------------
+
+
+def test_client_raises_without_api_key() -> None:
+    with patch("async_jquants_api_client.client.os.path.isfile", return_value=False):
+        with patch("async_jquants_api_client.client.os.environ.get", return_value=""):
+            with pytest.raises(ValueError):
+                JQuantsClient()
+
+
+def test_client_api_key_from_config_file() -> None:
+    # _read_config をモックして設定ファイルから api_key を取得するケースをテスト
+    # JQUANTS_API_KEY 環境変数が未設定の場合は設定ファイルの値が使われる
+    env = {k: v for k, v in os.environ.items() if k != "JQUANTS_API_KEY"}
+    with patch(
+        "async_jquants_api_client.client.JQuantsClient._read_config",
+        return_value={"api_key": "key_from_file"},
+    ):
+        with patch.dict(os.environ, env, clear=True):
+            client = JQuantsClient()
+    assert client._api_key == "key_from_file"
+
+
+def test_client_env_var_overrides_config_file() -> None:
+    # JQUANTS_API_KEY 環境変数が設定ファイルより優先される
+    with patch(
+        "async_jquants_api_client.client.JQuantsClient._read_config",
+        return_value={"api_key": "key_from_file"},
+    ):
+        with patch.dict(os.environ, {"JQUANTS_API_KEY": "key_from_env"}):
+            client = JQuantsClient()
+    assert client._api_key == "key_from_env"
+
+
+def test_client_arg_overrides_env_var() -> None:
+    # api_key を引数で渡すと環境変数より優先される
+    client = JQuantsClient(api_key="key_from_arg")
+    assert client._api_key == "key_from_arg"
+
+
+# ------------------------------------------------------------------
+# パラメータ生成テスト
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_eq_master_params(httpx_mock: HTTPXMock) -> None:
+    cases = [
+        ({}, {}),
+        ({"code": "86970"}, {"code": "86970"}),
+        ({"date": "20220101"}, {"date": "20220101"}),
+        ({"code": "86970", "date": "20220101"}, {"code": "86970", "date": "20220101"}),
+    ]
+    for kwargs, expected_params in cases:
+        httpx_mock.add_response(status_code=200, json={"data": []})
+        async with JQuantsClient(api_key="dummy") as client:
+            await client.get_eq_master(**kwargs)
+        request = httpx_mock.get_requests()[-1]
+        actual = dict(request.url.params)
+        assert actual == expected_params, f"kwargs={kwargs}: expected {expected_params}, got {actual}"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_bars_daily_params(httpx_mock: HTTPXMock) -> None:
+    cases = [
+        ({}, {}),
+        ({"code": "86970"}, {"code": "86970"}),
+        (
+            {"code": "86970", "from_yyyymmdd": "20220101"},
+            {"code": "86970", "from": "20220101"},
+        ),
+        (
+            {"code": "86970", "to_yyyymmdd": "20220131"},
+            {"code": "86970", "to": "20220131"},
+        ),
+        (
+            {"code": "86970", "from_yyyymmdd": "20220101", "to_yyyymmdd": "20220131"},
+            {"code": "86970", "from": "20220101", "to": "20220131"},
+        ),
+        ({"date_yyyymmdd": "20220115"}, {"date": "20220115"}),
+        (
+            {"code": "86970", "date_yyyymmdd": "20220115"},
+            {"code": "86970", "date": "20220115"},
+        ),
+    ]
+    for kwargs, expected_params in cases:
+        httpx_mock.add_response(status_code=200, json={"data": []})
+        async with JQuantsClient(api_key="dummy") as client:
+            await client.get_eq_bars_daily(**kwargs)
+        request = httpx_mock.get_requests()[-1]
+        actual = dict(request.url.params)
+        assert actual == expected_params, f"kwargs={kwargs}: expected {expected_params}, got {actual}"
+
+
+# ------------------------------------------------------------------
+# get_eq_bars_daily_range の日付形式
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_eq_bars_daily_range_accepts_various_date_formats(
+    httpx_mock: HTTPXMock,
+) -> None:
+    import pandas as pd
+    from dateutil import tz
+
+    from async_jquants_api_client.client import DatetimeLike
+
+    jst = tz.gettz("Asia/Tokyo")
+    date_formats: list[tuple[DatetimeLike, DatetimeLike]] = [
+        ("20200227", "20200302"),  # 8桁文字列
+        ("2020-02-27", "2020-03-02"),  # ハイフン区切り文字列
+        (datetime(2020, 2, 27), datetime(2020, 3, 2)),  # datetime
+        (
+            datetime(2020, 2, 27, tzinfo=jst),
+            datetime(2020, 3, 2, tzinfo=jst),
+        ),  # datetime with tz
+        (pd.Timestamp("2020-02-27"), pd.Timestamp("2020-03-02")),  # pd.Timestamp
+    ]
+    expected_dates = {
+        "2020-02-27",
+        "2020-02-28",
+        "2020-02-29",
+        "2020-03-01",
+        "2020-03-02",
+    }
+
+    for start, end in date_formats:
+        # 5日分のレスポンスを登録
+        for _ in range(5):
+            httpx_mock.add_response(status_code=200, json={"data": []})
+        async with JQuantsClient(api_key="dummy") as client:
+            await client.get_eq_bars_daily_range(start, end)
+        requests = httpx_mock.get_requests()[-5:]
+        actual_dates = {dict(r.url.params).get("date") for r in requests}
+        assert actual_dates == expected_dates, f"format {type(start)}: expected {expected_dates}, got {actual_dates}"
+
+
+@pytest.mark.asyncio
+async def test_get_raises_auth_error_on_401(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=401)
+    async with JQuantsClient(api_key="dummy") as client:
+        with pytest.raises(JQuantsAuthError):
+            await client._get("/some/path", {})
+
+
+@pytest.mark.asyncio
+async def test_get_raises_auth_error_on_403(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=403)
+    async with JQuantsClient(api_key="dummy") as client:
+        with pytest.raises(JQuantsAuthError):
+            await client._get("/some/path", {})
+
+
+@pytest.mark.asyncio
+async def test_get_raises_api_error_on_500(httpx_mock: HTTPXMock) -> None:
+    # 500 should be retried 3 times then raise
+    httpx_mock.add_response(status_code=500)
+    httpx_mock.add_response(status_code=500)
+    httpx_mock.add_response(status_code=500)
+    async with JQuantsClient(api_key="dummy") as client:
+        with pytest.raises(JQuantsAPIError):
+            await client._get("/some/path", {})
+
+
+@pytest.mark.asyncio
+async def test_get_retries_on_500_then_succeeds(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=500)
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClient(api_key="dummy") as client:
+        response = await client._get("/some/path", {})
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_paginate_yields_all_items_single_page(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"id": 1}, {"id": 2}]},
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        items = [item async for item in client._paginate("/some/path", {})]
+    assert items == [{"id": 1}, {"id": 2}]
+
+
+@pytest.mark.asyncio
+async def test_paginate_follows_pagination_key(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"id": 1}], "pagination_key": "page2"},
+    )
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"id": 2}]},
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        items = [item async for item in client._paginate("/some/path", {})]
+    assert items == [{"id": 1}, {"id": 2}]
+
+
+# ------------------------------------------------------------------
+# eq-master
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_eq_master_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2022-11-11",
+                    "Code": "86970",
+                    "CoName": "日本取引所グループ",
+                    "CoNameEn": "Japan Exchange Group,Inc.",
+                    "S17": "16",
+                    "S17Nm": "金融（除く銀行）",
+                    "S33": "7200",
+                    "S33Nm": "その他金融業",
+                    "ScaleCat": "TOPIX Large70",
+                    "Mkt": "0111",
+                    "MktNm": "プライム",
+                    "Mrgn": "1",
+                    "MrgnNm": "信用",
+                }
+            ]
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_eq_master()
+    assert isinstance(df, pd.DataFrame)
+    assert df.iloc[0]["Code"] == "86970"
+    assert df.iloc[0]["CoName"] == "日本取引所グループ"
+    assert df.iloc[0]["S33"] == "7200"
+    assert df.iloc[0]["Mkt"] == "0111"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_master_empty(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_eq_master()
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+
+
+# ------------------------------------------------------------------
+# eq-bars-daily
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_eq_bars_daily_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2023-03-24",
+                    "Code": "86970",
+                    "O": 2047.0,
+                    "H": 2069.0,
+                    "L": 2035.0,
+                    "C": 2045.0,
+                    "UL": "0",
+                    "LL": "0",
+                    "Vo": 2202500.0,
+                    "Va": 4507051850.0,
+                    "AdjFactor": 1.0,
+                    "AdjO": 2047.0,
+                    "AdjH": 2069.0,
+                    "AdjL": 2035.0,
+                    "AdjC": 2045.0,
+                    "AdjVo": 2202500.0,
+                }
+            ]
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_eq_bars_daily(code="86970", date_yyyymmdd="2023-03-24")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "86970"
+    assert df.iloc[0]["O"] == 2047.0
+    assert df.iloc[0]["H"] == 2069.0
+    assert df.iloc[0]["L"] == 2035.0
+    assert df.iloc[0]["C"] == 2045.0
+    assert df.iloc[0]["Date"] == pd.Timestamp("2023-03-24")
+
+
+@pytest.mark.asyncio
+async def test_get_eq_bars_daily_follows_pagination(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2023-03-24",
+                    "Code": "86970",
+                    "O": 2047.0,
+                    "H": 2069.0,
+                    "L": 2035.0,
+                    "C": 2045.0,
+                }
+            ],
+            "pagination_key": "value1.value2.",
+        },
+    )
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2023-03-24",
+                    "Code": "13010",
+                    "O": 100.0,
+                    "H": 110.0,
+                    "L": 95.0,
+                    "C": 105.0,
+                }
+            ],
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_eq_bars_daily(date_yyyymmdd="2023-03-24")
+    assert len(df) == 2
+    assert list(df["Code"]) == ["13010", "86970"]
+
+
+@pytest.mark.asyncio
+async def test_get_eq_bars_daily_range_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    # 2日分のリクエストに対してそれぞれ1件返す
+    httpx_mock.add_response(status_code=200, json={"data": [{"Code": "1234", "Date": "2024-01-05"}]})
+    httpx_mock.add_response(status_code=200, json={"data": [{"Code": "1234", "Date": "2024-01-06"}]})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_eq_bars_daily_range("20240105", "20240106")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 2
+    assert list(df["Date"]) == [pd.Timestamp("2024-01-05"), pd.Timestamp("2024-01-06")]
+
+
+@pytest.mark.asyncio
+async def test_get_eq_bars_daily_range_empty(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_eq_bars_daily_range("20240105", "20240105")
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+
+
+@pytest.mark.asyncio
+async def test_get_eq_bars_daily_range_chunks_requests(httpx_mock: HTTPXMock) -> None:
+    """チャンク境界をまたぐ日付範囲でも全件取得できることを確認"""
+    from async_jquants_api_client.client import _RANGE_CHUNK_SIZE
+
+    n_days = _RANGE_CHUNK_SIZE + 1
+    dates = pd.date_range("20240101", periods=n_days, freq="D")
+    for d in dates:
+        httpx_mock.add_response(
+            status_code=200,
+            json={"data": [{"Code": "1234", "Date": d.strftime("%Y-%m-%d")}]},
+        )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_eq_bars_daily_range(dates[0].strftime("%Y%m%d"), dates[-1].strftime("%Y%m%d"))
+    assert len(df) == n_days
+
+
+# ------------------------------------------------------------------
+# fins-summary
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_fin_summary_range_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    row: dict[str, Any] = {col: None for col in FIN_SUMMARY_COLUMNS_V2}
+    row["Code"] = "1234"
+    row["DiscDate"] = "2024-01-05"
+    httpx_mock.add_response(status_code=200, json={"data": [row]})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_fin_summary_range("20240105", "20240105")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "1234"
+
+
+@pytest.mark.asyncio
+async def test_get_fin_summary_range_uses_cache(tmp_path: Any) -> None:
+    row: dict[str, Any] = {col: None for col in FIN_SUMMARY_COLUMNS_V2}
+    row["Code"] = "5678"
+    row["DiscDate"] = "2024-01-05"
+    df_cached = pd.DataFrame([row])
+    cache_dir = str(tmp_path)
+    yyyy = "2024"
+    os.makedirs(f"{cache_dir}/{yyyy}", exist_ok=True)
+    df_cached.to_csv(f"{cache_dir}/{yyyy}/v2_fin_summary_20240105.csv.gz", index=False)
+
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_fin_summary_range("20240105", "20240105", cache_dir=cache_dir)
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "5678"
+
+
+# ------------------------------------------------------------------
+# fins-details
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_fin_details_range_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    row = {
+        "DiscDate": "2024-01-05",
+        "DiscTime": "12:00:00",
+        "Code": "1234",
+        "DiscNo": "1",
+        "DocType": "X",
+        "FS": {},
+    }
+    httpx_mock.add_response(status_code=200, json={"data": [row]})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_fin_details_range("20240105", "20240105")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "1234"
+
+
+@pytest.mark.asyncio
+async def test_get_fin_details_range_uses_cache(tmp_path: Any) -> None:
+    row = {
+        "DiscDate": "2024-01-05",
+        "DiscTime": "12:00:00",
+        "Code": "5678",
+        "DiscNo": "1",
+        "DocType": "X",
+        "FS": {},
+    }
+    df_cached = pd.DataFrame([row])
+    cache_dir = str(tmp_path)
+    os.makedirs(f"{cache_dir}/2024", exist_ok=True)
+    df_cached.to_csv(f"{cache_dir}/2024/v2_fin_details_20240105.csv.gz", index=False)
+
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_fin_details_range("20240105", "20240105", cache_dir=cache_dir)
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "5678"
+
+
+# ------------------------------------------------------------------
+# mkt-short-ratio
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_mkt_short_ratio_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2022-10-25",
+                    "S33": "0050",
+                    "SellExShortVa": 1333126400.0,
+                    "ShrtWithResVa": 787355200.0,
+                    "ShrtNoResVa": 149084300.0,
+                }
+            ]
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_mkt_short_ratio(date_yyyymmdd="2022-10-25")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["S33"] == "0050"
+    assert df.iloc[0]["SellExShortVa"] == 1333126400.0
+    assert df.iloc[0]["Date"] == pd.Timestamp("2022-10-25")
+
+
+@pytest.mark.asyncio
+async def test_get_mkt_short_ratio_range_returns_dataframe(
+    httpx_mock: HTTPXMock,
+) -> None:
+    from async_jquants_api_client.constants import MKT_SHORT_RATIO_COLUMNS_V2
+
+    row: dict[str, Any] = {col: None for col in MKT_SHORT_RATIO_COLUMNS_V2}
+    row["Date"] = "2024-01-05"
+    row["S33"] = "0050"
+    httpx_mock.add_response(status_code=200, json={"data": [row]})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_mkt_short_ratio_range("20240105", "20240105")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["S33"] == "0050"
+
+
+# ------------------------------------------------------------------
+# mkt-margin-alert
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_mkt_margin_alert_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "PubDate": "2024-02-08",
+                    "Code": "13260",
+                    "AppDate": "2024-02-07",
+                    "PubReason": {
+                        "Restricted": "0",
+                        "DailyPublication": "0",
+                        "Monitoring": "0",
+                        "RestrictedByJSF": "0",
+                        "PrecautionByJSF": "1",
+                        "UnclearOrSecOnAlert": "0",
+                    },
+                    "ShrtOut": 11.0,
+                    "ShrtOutChg": 0.0,
+                    "ShrtOutRatio": "*",
+                    "LongOut": 676.0,
+                    "LongOutChg": -20.0,
+                    "LongOutRatio": "*",
+                    "SLRatio": 1.6,
+                    "ShrtNegOut": 0.0,
+                    "ShrtNegOutChg": 0.0,
+                    "ShrtStdOut": 11.0,
+                    "ShrtStdOutChg": 0.0,
+                    "LongNegOut": 192.0,
+                    "LongNegOutChg": -20.0,
+                    "LongStdOut": 484.0,
+                    "LongStdOutChg": 0.0,
+                    "TSEMrgnRegCls": "001",
+                }
+            ]
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_mkt_margin_alert()
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "13260"
+    assert df.iloc[0]["PubDate"] == pd.Timestamp("2024-02-08")
+    assert df.iloc[0]["ShrtOut"] == 11.0
+    assert df.iloc[0]["SLRatio"] == 1.6
+
+
+# ------------------------------------------------------------------
+# mkt-breakdown
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_mkt_breakdown_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2015-04-01",
+                    "Code": "13010",
+                    "LongSellVa": 115164000.0,
+                    "ShrtNoMrgnVa": 93561000.0,
+                    "MrgnSellNewVa": 6412000.0,
+                    "MrgnSellCloseVa": 23009000.0,
+                    "LongBuyVa": 185114000.0,
+                    "MrgnBuyNewVa": 35568000.0,
+                    "MrgnBuyCloseVa": 17464000.0,
+                    "LongSellVo": 415000.0,
+                    "ShrtNoMrgnVo": 337000.0,
+                    "MrgnSellNewVo": 23000.0,
+                    "MrgnSellCloseVo": 83000.0,
+                    "LongBuyVo": 667000.0,
+                    "MrgnBuyNewVo": 128000.0,
+                    "MrgnBuyCloseVo": 63000.0,
+                }
+            ]
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_mkt_breakdown(date_yyyymmdd="2015-04-01")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "13010"
+    assert df.iloc[0]["LongSellVa"] == 115164000.0
+    assert df.iloc[0]["Date"] == pd.Timestamp("2015-04-01")
+
+
+@pytest.mark.asyncio
+async def test_get_mkt_breakdown_range_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2015-04-01",
+                    "Code": "13010",
+                    "LongSellVa": 115164000.0,
+                    "ShrtNoMrgnVa": 93561000.0,
+                    "MrgnSellNewVa": 6412000.0,
+                    "MrgnSellCloseVa": 23009000.0,
+                    "LongBuyVa": 185114000.0,
+                    "MrgnBuyNewVa": 35568000.0,
+                    "MrgnBuyCloseVa": 17464000.0,
+                    "LongSellVo": 415000.0,
+                    "ShrtNoMrgnVo": 337000.0,
+                    "MrgnSellNewVo": 23000.0,
+                    "MrgnSellCloseVo": 83000.0,
+                    "LongBuyVo": 667000.0,
+                    "MrgnBuyNewVo": 128000.0,
+                    "MrgnBuyCloseVo": 63000.0,
+                }
+            ]
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_mkt_breakdown_range("20150401", "20150401")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "13010"
+
+
+# ------------------------------------------------------------------
+# get_list (マージロジックの確認)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_list_merges_sector_and_market_names(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2022-11-11",
+                    "Code": "86970",
+                    "CoName": "日本取引所グループ",
+                    "CoNameEn": "Japan Exchange Group,Inc.",
+                    "S17": "16",
+                    "S17Nm": "金融（除く銀行）",
+                    "S33": "7200",
+                    "S33Nm": "その他金融業",
+                    "ScaleCat": "TOPIX Large70",
+                    "Mkt": "0111",
+                    "MktNm": "プライム",
+                    "Mrgn": "1",
+                    "MrgnNm": "信用",
+                }
+            ]
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_list()
+    assert isinstance(df, pd.DataFrame)
+    assert "S17NmEn" in df.columns
+    assert "S33NmEn" in df.columns
+    assert "MktNmEn" in df.columns
+    assert df.iloc[0]["S17NmEn"] == "FINANCIALS (EX BANKS) "
+    assert df.iloc[0]["S33NmEn"] == "Other Financing Business"
+    assert df.iloc[0]["MktNmEn"] == "Prime"
+
+
+@pytest.mark.asyncio
+async def test_get_list_empty_returns_empty_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_list()
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+
+
+# ------------------------------------------------------------------
+# fins-summary / fins-details (単体)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_fin_summary_converts_date_columns(httpx_mock: HTTPXMock) -> None:
+    row: dict[str, Any] = {col: None for col in FIN_SUMMARY_COLUMNS_V2}
+    row["Code"] = "86970"
+    row["DiscDate"] = "2024-03-15"
+    row["CurFYSt"] = "2023-04-01"
+    row["CurFYEn"] = "2024-03-31"
+    httpx_mock.add_response(status_code=200, json={"data": [row]})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_fin_summary(date_yyyymmdd="2024-03-15")
+    assert df.iloc[0]["DiscDate"] == pd.Timestamp("2024-03-15")
+    assert df.iloc[0]["CurFYSt"] == pd.Timestamp("2023-04-01")
+    assert df.iloc[0]["CurFYEn"] == pd.Timestamp("2024-03-31")
+
+
+@pytest.mark.asyncio
+async def test_get_fin_details_converts_disc_date(httpx_mock: HTTPXMock) -> None:
+    row = {
+        "DiscDate": "2024-03-15",
+        "DiscTime": "15:00:00",
+        "Code": "86970",
+        "DiscNo": "1",
+        "DocType": "120",
+        "FS": {},
+    }
+    httpx_mock.add_response(status_code=200, json={"data": [row]})
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_fin_details(date_yyyymmdd="2024-03-15")
+    assert df.iloc[0]["DiscDate"] == pd.Timestamp("2024-03-15")
+    assert df.iloc[0]["Code"] == "86970"
+
+
+# ------------------------------------------------------------------
+# mkt-short-sale-report (複数日付列の変換)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_mkt_short_sale_report_converts_date_columns(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "DiscDate": "2024-02-08",
+                    "CalcDate": "2024-02-06",
+                    "PrevRptDate": "2024-02-01",
+                    "Code": "13260",
+                    "ShrtSellBal": 100000.0,
+                    "IssueShrs": 5000000.0,
+                }
+            ]
+        },
+    )
+    async with JQuantsClient(api_key="dummy") as client:
+        df = await client.get_mkt_short_sale_report(disclosed_date="2024-02-08")
+    assert df.iloc[0]["DiscDate"] == pd.Timestamp("2024-02-08")
+    assert df.iloc[0]["CalcDate"] == pd.Timestamp("2024-02-06")
+    assert df.iloc[0]["PrevRptDate"] == pd.Timestamp("2024-02-01")
+    assert df.iloc[0]["Code"] == "13260"
+
+
+# ------------------------------------------------------------------
+# _aggregate_bars_n_minute (集約ロジック)
+# ------------------------------------------------------------------
+
+
+def test_aggregate_bars_n_minute_ohlcv_aggregation() -> None:
+    """H=max, L=min, O=first, C=last, Vo/Va=sum の集約ルールを検証"""
+    df = pd.DataFrame(
+        [
+            {
+                "Date": "2024-01-05",
+                "Time": "09:00:00",
+                "Code": "86970",
+                "O": 100.0,
+                "H": 105.0,
+                "L": 98.0,
+                "C": 103.0,
+                "Vo": 1000.0,
+                "Va": 100000.0,
+            },
+            {
+                "Date": "2024-01-05",
+                "Time": "09:01:00",
+                "Code": "86970",
+                "O": 103.0,
+                "H": 110.0,
+                "L": 102.0,
+                "C": 108.0,
+                "Vo": 2000.0,
+                "Va": 200000.0,
+            },
+            {
+                "Date": "2024-01-05",
+                "Time": "09:02:00",
+                "Code": "86970",
+                "O": 108.0,
+                "H": 112.0,
+                "L": 107.0,
+                "C": 109.0,
+                "Vo": 1500.0,
+                "Va": 150000.0,
+            },
+            {
+                "Date": "2024-01-05",
+                "Time": "09:03:00",
+                "Code": "86970",
+                "O": 109.0,
+                "H": 111.0,
+                "L": 106.0,
+                "C": 107.0,
+                "Vo": 500.0,
+                "Va": 50000.0,
+            },
+            {
+                "Date": "2024-01-05",
+                "Time": "09:04:00",
+                "Code": "86970",
+                "O": 107.0,
+                "H": 108.0,
+                "L": 105.0,
+                "C": 106.0,
+                "Vo": 800.0,
+                "Va": 80000.0,
+            },
+        ]
+    )
+    result = _aggregate_bars_n_minute(df, n=5)
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["O"] == 100.0  # 始値: 最初
+    assert row["H"] == 112.0  # 高値: 最大
+    assert row["L"] == 98.0  # 安値: 最小
+    assert row["C"] == 106.0  # 終値: 最後
+    assert row["Vo"] == 5800.0  # 出来高: 合計
+    assert row["Va"] == 580000.0  # 売買代金: 合計
+
+
+def test_aggregate_bars_n_minute_multiple_codes() -> None:
+    """複数銘柄が独立して集約されることを確認"""
+    df = pd.DataFrame(
+        [
+            {
+                "Date": "2024-01-05",
+                "Time": "09:00:00",
+                "Code": "11110",
+                "O": 200.0,
+                "H": 210.0,
+                "L": 195.0,
+                "C": 205.0,
+                "Vo": 300.0,
+                "Va": 60000.0,
+            },
+            {
+                "Date": "2024-01-05",
+                "Time": "09:00:00",
+                "Code": "22220",
+                "O": 500.0,
+                "H": 510.0,
+                "L": 495.0,
+                "C": 505.0,
+                "Vo": 100.0,
+                "Va": 50000.0,
+            },
+        ]
+    )
+    result = _aggregate_bars_n_minute(df, n=5)
+
+    assert len(result) == 2
+    codes = set(result["Code"])
+    assert codes == {"11110", "22220"}
+
+
+def test_aggregate_bars_n_minute_empty() -> None:
+    df = pd.DataFrame(columns=["Date", "Time", "Code", "O", "H", "L", "C", "Vo", "Va"])
+    result = _aggregate_bars_n_minute(df, n=5)
+    assert result.empty

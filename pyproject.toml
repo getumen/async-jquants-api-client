@@ -1,0 +1,47 @@
+[project]
+name = "async-jquants-api-client"
+version = "0.1.0"
+description = "Async Python client for JQuants API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiolimiter >= 1.1.0",
+    "httpx >= 0.23.0",
+    "tenacity >= 8.2.0",
+    "pandas >= 2.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/async_jquants_api_client"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pre-commit",
+    "pytest-asyncio",
+    "pytest-httpx",
+    "ruff",
+]

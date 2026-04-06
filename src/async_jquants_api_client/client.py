@@ -77,7 +77,7 @@ def _aggregate_bars_n_minute(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
 class JQuantsClient:
     BASE_URL = "https://api.jquants.com/v2"
 
-    def __init__(self, api_key: str | None = None, plan: Plan | None = Plan.FREE) -> None:
+    def __init__(self, api_key: str | None = None, plan: Plan = Plan.FREE) -> None:
         config = self._load_config()
 
         if api_key is not None:
@@ -94,6 +94,7 @@ class JQuantsClient:
         self._http = httpx.AsyncClient(
             base_url=self.BASE_URL,
             headers={"x-api-key": self._api_key},
+            timeout=30.0,
         )
         self._limiter = aiolimiter.AsyncLimiter(_RATE_LIMITS[plan], 60)
 
@@ -146,7 +147,7 @@ class JQuantsClient:
             raise JQuantsAuthError(f"Authentication failed: {response.status_code}")
         if response.status_code in _RETRYABLE_STATUS_CODES:
             raise httpx.HTTPStatusError(
-                message=f"HTTP {response.status_code}",
+                f"HTTP {response.status_code}",
                 request=response.request,
                 response=response,
             )
@@ -302,7 +303,7 @@ class JQuantsClient:
         ]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.EQ_BARS_DAILY_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         if "Date" in df.columns:
@@ -358,7 +359,7 @@ class JQuantsClient:
         all_data = [item async for item in self._paginate("/equities/bars/daily/am", params=params)]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.PRICES_PRICES_AM_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         if "Date" in df.columns:
@@ -507,7 +508,7 @@ class JQuantsClient:
         all_data = [item async for item in self._paginate("/equities/investor-types", params=params)]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.EQ_INVESTOR_TYPES_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         if "PubDate" in df.columns:
@@ -546,7 +547,7 @@ class JQuantsClient:
         all_data = [item async for item in self._paginate("/fins/summary", params=params)]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.FIN_SUMMARY_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         for col in (
@@ -650,7 +651,7 @@ class JQuantsClient:
         all_data = [item async for item in self._paginate("/fins/details", params=params)]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.FINS_FS_DETAILS_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         if "DiscDate" in df.columns:
@@ -740,7 +741,7 @@ class JQuantsClient:
         all_data = [item async for item in self._paginate("/fins/dividend", params=params)]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.FINS_DIVIDEND_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         if "PubDate" in df.columns:
@@ -764,7 +765,7 @@ class JQuantsClient:
         all_data = [item async for item in self._paginate("/equities/earnings-calendar", params={})]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.FINS_ANNOUNCEMENT_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         if "Date" in df.columns:
@@ -809,7 +810,7 @@ class JQuantsClient:
         all_data = [item async for item in self._paginate("/markets/short-ratio", params=params)]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.MKT_SHORT_RATIO_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         if "Date" in df.columns:
@@ -879,7 +880,7 @@ class JQuantsClient:
         all_data = [item async for item in self._paginate("/markets/short-sale-report", params=params)]
 
         if not all_data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.SHORT_SELLING_POSITIONS_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(all_data)
         for col in ("DiscDate", "CalcDate", "PrevRptDate"):
@@ -943,7 +944,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/markets/margin-interest", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.MARKETS_WEEKLY_MARGIN_INTEREST_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "Date" in df.columns:
@@ -1006,7 +1007,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/markets/margin-alert", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.DAILY_MARGIN_INTEREST_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "PubDate" in df.columns:
@@ -1069,7 +1070,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/markets/breakdown", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.MKT_BREAKDOWN_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "Date" in df.columns:
@@ -1130,7 +1131,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/markets/calendar", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.MARKETS_TRADING_CALENDAR_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "Date" in df.columns:
@@ -1171,7 +1172,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/indices/bars/daily", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.INDICES_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "Date" in df.columns:
@@ -1203,7 +1204,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/indices/bars/daily/topix", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.INDICES_TOPIX_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "Date" in df.columns:
@@ -1231,7 +1232,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/derivatives/bars/daily/futures", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.DERIVATIVES_FUTURES_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "Date" in df.columns:
@@ -1265,7 +1266,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/derivatives/bars/daily/options", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.DERIVATIVES_OPTIONS_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "Date" in df.columns:
@@ -1290,7 +1291,7 @@ class JQuantsClient:
 
         data = [item async for item in self._paginate("/derivatives/bars/daily/options/225", params=params)]
         if not data:
-            return pd.DataFrame()
+            return pd.DataFrame(columns=constants.DERIVATIVES_OPTIONS_COLUMNS_V2)
 
         df = pd.DataFrame.from_records(data)
         if "Date" in df.columns:

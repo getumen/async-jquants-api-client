@@ -72,7 +72,7 @@ def _aggregate_bars_n_minute(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     return result.reset_index(drop=True)
 
 
-class JQuantsClient:
+class JQuantsClientV2:
     BASE_URL = "https://api.jquants.com/v2"
 
     def __init__(self, api_key: str | None = None, plan: Plan = Plan.FREE) -> None:
@@ -94,7 +94,7 @@ class JQuantsClient:
             headers={"x-api-key": self._api_key},
             timeout=30.0,
         )
-        self._limiter = aiolimiter.AsyncLimiter(_RATE_LIMITS[plan], 60)
+        self._limiter = aiolimiter.AsyncLimiter(1, 60 / _RATE_LIMITS[plan])
 
     def _is_colab(self) -> bool:
         return "google.colab" in sys.modules
@@ -169,7 +169,7 @@ class JQuantsClient:
             if not pagination_key:
                 break
 
-    async def __aenter__(self) -> "JQuantsClient":
+    async def __aenter__(self) -> "JQuantsClientV2":
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -748,6 +748,29 @@ class JQuantsClient:
         if sort_cols:
             df.sort_values(sort_cols, inplace=True)
         return df.reset_index(drop=True)
+
+    async def get_fin_dividend_range(
+        self,
+        start_dt: DatetimeLike = "20170101",
+        end_dt: DatetimeLike | None = None,
+    ) -> pd.DataFrame:
+        """
+        配当金情報を日付範囲指定して取得 (v2: /fins/dividend)
+
+        Args:
+            start_dt: 取得開始日 (YYYYMMDD or YYYY-MM-DD)
+            end_dt: 取得終了日 (YYYYMMDD or YYYY-MM-DD)
+        """
+        dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
+        buff: list[pd.DataFrame] = []
+        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
+            results = await asyncio.gather(
+                *[self.get_fin_dividend(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in chunk]
+            )
+            buff.extend(df for df in results if not df.empty)
+        if not buff:
+            return pd.DataFrame()
+        return pd.concat(buff).sort_values(["PubDate", "Code"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # /equities/earnings-calendar (path_old: /fins/announcement)

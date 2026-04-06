@@ -37,10 +37,10 @@ api_key = "your_api_key_here"
 
 ```python
 import asyncio
-from async_jquants_api_client import JQuantsClient, Plan
+from async_jquants_api_client import JQuantsClientV2, Plan
 
 async def main():
-    async with JQuantsClient(api_key="your_api_key", plan=Plan.STANDARD) as client:
+    async with JQuantsClientV2(api_key="your_api_key", plan=Plan.STANDARD) as client:
         # 株価日足（1日分）
         df = await client.get_eq_bars_daily(code="86970", date_yyyymmdd="2024-01-05")
         print(df)
@@ -62,9 +62,9 @@ asyncio.run(main())
 | PREMIUM | 500 |
 
 ```python
-from async_jquants_api_client import JQuantsClient, Plan
+from async_jquants_api_client import JQuantsClientV2, Plan
 
-async with JQuantsClient(api_key="your_api_key", plan=Plan.PREMIUM) as client:
+async with JQuantsClientV2(api_key="your_api_key", plan=Plan.PREMIUM) as client:
     ...
 ```
 

@@ -25,7 +25,7 @@ def test_client_raises_without_api_key() -> None:
     with patch("async_jquants_api_client.client.os.path.isfile", return_value=False):
         with patch("async_jquants_api_client.client.os.environ.get", return_value=""):
             with pytest.raises(ValueError):
-                JQuantsClientV2()
+                JQuantsClientV2(plan=Plan.PREMIUM)
 
 
 def test_client_api_key_from_config_file() -> None:
@@ -37,7 +37,7 @@ def test_client_api_key_from_config_file() -> None:
         return_value={"api_key": "key_from_file"},
     ):
         with patch.dict(os.environ, env, clear=True):
-            client = JQuantsClientV2()
+            client = JQuantsClientV2(plan=Plan.PREMIUM)
     assert client._api_key == "key_from_file"
 
 
@@ -48,13 +48,13 @@ def test_client_env_var_overrides_config_file() -> None:
         return_value={"api_key": "key_from_file"},
     ):
         with patch.dict(os.environ, {"JQUANTS_API_KEY": "key_from_env"}):
-            client = JQuantsClientV2()
+            client = JQuantsClientV2(plan=Plan.PREMIUM)
     assert client._api_key == "key_from_env"
 
 
 def test_client_arg_overrides_env_var() -> None:
     # api_key を引数で渡すと環境変数より優先される
-    client = JQuantsClientV2(api_key="key_from_arg")
+    client = JQuantsClientV2(api_key="key_from_arg", plan=Plan.PREMIUM)
     assert client._api_key == "key_from_arg"
 
 
@@ -73,7 +73,7 @@ async def test_get_eq_master_params(httpx_mock: HTTPXMock) -> None:
     ]
     for kwargs, expected_params in cases:
         httpx_mock.add_response(status_code=200, json={"data": []})
-        async with JQuantsClientV2(api_key="dummy") as client:
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
             await client.get_eq_master(**kwargs)
         request = httpx_mock.get_requests()[-1]
         actual = dict(request.url.params)
@@ -105,7 +105,7 @@ async def test_get_eq_bars_daily_params(httpx_mock: HTTPXMock) -> None:
     ]
     for kwargs, expected_params in cases:
         httpx_mock.add_response(status_code=200, json={"data": []})
-        async with JQuantsClientV2(api_key="dummy") as client:
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
             await client.get_eq_bars_daily(**kwargs)
         request = httpx_mock.get_requests()[-1]
         actual = dict(request.url.params)
@@ -149,7 +149,7 @@ async def test_get_eq_bars_daily_range_accepts_various_date_formats(
         # 5日分のレスポンスを登録
         for _ in range(5):
             httpx_mock.add_response(status_code=200, json={"data": []})
-        async with JQuantsClientV2(api_key="dummy") as client:
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
             await client.get_eq_bars_daily_range(start, end)
         requests = httpx_mock.get_requests()[-5:]
         actual_dates = {dict(r.url.params).get("date") for r in requests}
@@ -159,7 +159,7 @@ async def test_get_eq_bars_daily_range_accepts_various_date_formats(
 @pytest.mark.asyncio
 async def test_get_raises_auth_error_on_401(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=401)
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         with pytest.raises(JQuantsAuthError):
             await client._get("/some/path", {})
 
@@ -167,7 +167,7 @@ async def test_get_raises_auth_error_on_401(httpx_mock: HTTPXMock) -> None:
 @pytest.mark.asyncio
 async def test_get_raises_auth_error_on_403(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=403)
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         with pytest.raises(JQuantsAuthError):
             await client._get("/some/path", {})
 
@@ -178,7 +178,7 @@ async def test_get_raises_api_error_on_500(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=500)
     httpx_mock.add_response(status_code=500)
     httpx_mock.add_response(status_code=500)
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         with pytest.raises(JQuantsAPIError):
             await client._get("/some/path", {})
 
@@ -187,7 +187,7 @@ async def test_get_raises_api_error_on_500(httpx_mock: HTTPXMock) -> None:
 async def test_get_retries_on_500_then_succeeds(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=500)
     httpx_mock.add_response(status_code=200, json={"data": []})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         response = await client._get("/some/path", {})
     assert response.status_code == 200
 
@@ -198,7 +198,7 @@ async def test_paginate_yields_all_items_single_page(httpx_mock: HTTPXMock) -> N
         status_code=200,
         json={"data": [{"id": 1}, {"id": 2}]},
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         items = [item async for item in client._paginate("/some/path", {})]
     assert items == [{"id": 1}, {"id": 2}]
 
@@ -213,7 +213,7 @@ async def test_paginate_follows_pagination_key(httpx_mock: HTTPXMock) -> None:
         status_code=200,
         json={"data": [{"id": 2}]},
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         items = [item async for item in client._paginate("/some/path", {})]
     assert items == [{"id": 1}, {"id": 2}]
 
@@ -247,7 +247,7 @@ async def test_get_eq_master_returns_dataframe(httpx_mock: HTTPXMock) -> None:
             ]
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_eq_master()
     assert isinstance(df, pd.DataFrame)
     assert df.iloc[0]["Code"] == "86970"
@@ -259,7 +259,7 @@ async def test_get_eq_master_returns_dataframe(httpx_mock: HTTPXMock) -> None:
 @pytest.mark.asyncio
 async def test_get_eq_master_empty(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=200, json={"data": []})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_eq_master()
     assert isinstance(df, pd.DataFrame)
     assert df.empty
@@ -297,7 +297,7 @@ async def test_get_eq_bars_daily_returns_dataframe(httpx_mock: HTTPXMock) -> Non
             ]
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_eq_bars_daily(code="86970", date_yyyymmdd="2023-03-24")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -342,7 +342,7 @@ async def test_get_eq_bars_daily_follows_pagination(httpx_mock: HTTPXMock) -> No
             ],
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_eq_bars_daily(date_yyyymmdd="2023-03-24")
     assert len(df) == 2
     assert list(df["Code"]) == ["13010", "86970"]
@@ -353,7 +353,7 @@ async def test_get_eq_bars_daily_range_returns_dataframe(httpx_mock: HTTPXMock) 
     # 2日分のリクエストに対してそれぞれ1件返す
     httpx_mock.add_response(status_code=200, json={"data": [{"Code": "1234", "Date": "2024-01-05"}]})
     httpx_mock.add_response(status_code=200, json={"data": [{"Code": "1234", "Date": "2024-01-06"}]})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_eq_bars_daily_range("20240105", "20240106")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 2
@@ -363,19 +363,16 @@ async def test_get_eq_bars_daily_range_returns_dataframe(httpx_mock: HTTPXMock) 
 @pytest.mark.asyncio
 async def test_get_eq_bars_daily_range_empty(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=200, json={"data": []})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_eq_bars_daily_range("20240105", "20240105")
     assert isinstance(df, pd.DataFrame)
     assert df.empty
 
 
 @pytest.mark.asyncio
-async def test_get_eq_bars_daily_range_chunks_requests(httpx_mock: HTTPXMock) -> None:
-    """チャンク境界をまたぐ日付範囲でも全件取得できることを確認"""
-    from async_jquants_api_client.client import _RANGE_CHUNK_SIZE
-
-    n_days = _RANGE_CHUNK_SIZE + 1
-    dates = pd.date_range("20240101", periods=n_days, freq="D")
+async def test_get_eq_bars_daily_range_requests_all_dates(httpx_mock: HTTPXMock) -> None:
+    """日付範囲内の各日付に対してデータ取得できることを確認"""
+    dates = pd.date_range("20240101", periods=5, freq="D")
     for d in dates:
         httpx_mock.add_response(
             status_code=200,
@@ -383,7 +380,9 @@ async def test_get_eq_bars_daily_range_chunks_requests(httpx_mock: HTTPXMock) ->
         )
     async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_eq_bars_daily_range(dates[0].strftime("%Y%m%d"), dates[-1].strftime("%Y%m%d"))
-    assert len(df) == n_days
+    assert len(df) == len(dates)
+    requested_dates = [dict(r.url.params)["date"] for r in httpx_mock.get_requests()]
+    assert requested_dates == [d.strftime("%Y-%m-%d") for d in dates]
 
 
 # ------------------------------------------------------------------
@@ -397,7 +396,7 @@ async def test_get_fin_summary_range_returns_dataframe(httpx_mock: HTTPXMock) ->
     row["Code"] = "1234"
     row["DiscDate"] = "2024-01-05"
     httpx_mock.add_response(status_code=200, json={"data": [row]})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_summary_range("20240105", "20240105")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -415,7 +414,7 @@ async def test_get_fin_summary_range_uses_cache(tmp_path: Any) -> None:
     os.makedirs(f"{cache_dir}/{yyyy}", exist_ok=True)
     df_cached.to_csv(f"{cache_dir}/{yyyy}/v2_fin_summary_20240105.csv.gz", index=False)
 
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_summary_range("20240105", "20240105", cache_dir=cache_dir)
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -438,7 +437,7 @@ async def test_get_fin_details_range_returns_dataframe(httpx_mock: HTTPXMock) ->
         "FS": {},
     }
     httpx_mock.add_response(status_code=200, json={"data": [row]})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_details_range("20240105", "20240105")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -460,7 +459,7 @@ async def test_get_fin_details_range_uses_cache(tmp_path: Any) -> None:
     os.makedirs(f"{cache_dir}/2024", exist_ok=True)
     df_cached.to_csv(f"{cache_dir}/2024/v2_fin_details_20240105.csv.gz", index=False)
 
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_details_range("20240105", "20240105", cache_dir=cache_dir)
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -478,7 +477,7 @@ async def test_get_fin_dividend_range_returns_dataframe(httpx_mock: HTTPXMock) -
     row["PubDate"] = "2024-01-05"
     row["Code"] = "1234"
     httpx_mock.add_response(status_code=200, json={"data": [row]})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_dividend_range("20240105", "20240105")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -488,7 +487,7 @@ async def test_get_fin_dividend_range_returns_dataframe(httpx_mock: HTTPXMock) -
 @pytest.mark.asyncio
 async def test_get_fin_dividend_range_empty(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=200, json={"data": []})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_dividend_range("20240105", "20240105")
     assert isinstance(df, pd.DataFrame)
     assert df.empty
@@ -515,7 +514,7 @@ async def test_get_mkt_short_ratio_returns_dataframe(httpx_mock: HTTPXMock) -> N
             ]
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_mkt_short_ratio(date_yyyymmdd="2022-10-25")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -534,7 +533,7 @@ async def test_get_mkt_short_ratio_range_returns_dataframe(
     row["Date"] = "2024-01-05"
     row["S33"] = "0050"
     httpx_mock.add_response(status_code=200, json={"data": [row]})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_mkt_short_ratio_range("20240105", "20240105")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -584,7 +583,7 @@ async def test_get_mkt_margin_alert_returns_dataframe(httpx_mock: HTTPXMock) -> 
             ]
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_mkt_margin_alert()
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -626,7 +625,7 @@ async def test_get_mkt_breakdown_returns_dataframe(httpx_mock: HTTPXMock) -> Non
             ]
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_mkt_breakdown(date_yyyymmdd="2015-04-01")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -662,7 +661,7 @@ async def test_get_mkt_breakdown_range_returns_dataframe(httpx_mock: HTTPXMock) 
             ]
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_mkt_breakdown_range("20150401", "20150401")
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
@@ -698,7 +697,7 @@ async def test_get_list_merges_sector_and_market_names(httpx_mock: HTTPXMock) ->
             ]
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_list()
     assert isinstance(df, pd.DataFrame)
     assert "S17NmEn" in df.columns
@@ -712,7 +711,7 @@ async def test_get_list_merges_sector_and_market_names(httpx_mock: HTTPXMock) ->
 @pytest.mark.asyncio
 async def test_get_list_empty_returns_empty_dataframe(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(status_code=200, json={"data": []})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_list()
     assert isinstance(df, pd.DataFrame)
     assert df.empty
@@ -731,7 +730,7 @@ async def test_get_fin_summary_converts_date_columns(httpx_mock: HTTPXMock) -> N
     row["CurFYSt"] = "2023-04-01"
     row["CurFYEn"] = "2024-03-31"
     httpx_mock.add_response(status_code=200, json={"data": [row]})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_summary(date_yyyymmdd="2024-03-15")
     assert df.iloc[0]["DiscDate"] == pd.Timestamp("2024-03-15")
     assert df.iloc[0]["CurFYSt"] == pd.Timestamp("2023-04-01")
@@ -749,7 +748,7 @@ async def test_get_fin_details_converts_disc_date(httpx_mock: HTTPXMock) -> None
         "FS": {},
     }
     httpx_mock.add_response(status_code=200, json={"data": [row]})
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_details(date_yyyymmdd="2024-03-15")
     assert df.iloc[0]["DiscDate"] == pd.Timestamp("2024-03-15")
     assert df.iloc[0]["Code"] == "86970"
@@ -779,7 +778,7 @@ async def test_get_mkt_short_sale_report_converts_date_columns(
             ]
         },
     )
-    async with JQuantsClientV2(api_key="dummy") as client:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_mkt_short_sale_report(disclosed_date="2024-02-08")
     assert df.iloc[0]["DiscDate"] == pd.Timestamp("2024-02-08")
     assert df.iloc[0]["CalcDate"] == pd.Timestamp("2024-02-06")

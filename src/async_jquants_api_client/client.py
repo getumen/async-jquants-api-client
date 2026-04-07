@@ -25,14 +25,8 @@ _RATE_LIMITS: dict[Plan, int] = {
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
-_RANGE_CHUNK_SIZE = 30
 
 DatetimeLike: TypeAlias = str | date | datetime | pd.Timestamp
-
-
-def _chunked(it: list, n: int):
-    for i in range(0, len(it), n):
-        yield it[i : i + n]
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -329,11 +323,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[self.get_eq_bars_daily(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in chunk]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(*[self.get_eq_bars_daily(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
@@ -607,16 +598,15 @@ class JQuantsClientV2:
             else:
                 fetch_dates.append(yyyymmdd)
 
-        for chunk in _chunked(fetch_dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(*[self.get_fin_summary(date_yyyymmdd=d) for d in chunk])
-            for yyyymmdd, df in zip(chunk, results):
-                if df.empty:
-                    continue
-                buff.append(df)
-                if cache_dir:
-                    cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_summary_{yyyymmdd}.csv.gz"
-                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                    df.to_csv(cache_path, index=False)
+        results = await asyncio.gather(*[self.get_fin_summary(date_yyyymmdd=d) for d in fetch_dates])
+        for yyyymmdd, df in zip(fetch_dates, results):
+            if df.empty:
+                continue
+            buff.append(df)
+            if cache_dir:
+                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_summary_{yyyymmdd}.csv.gz"
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                df.to_csv(cache_path, index=False)
 
         if not buff:
             return pd.DataFrame()
@@ -688,16 +678,15 @@ class JQuantsClientV2:
             else:
                 fetch_dates.append(yyyymmdd)
 
-        for chunk in _chunked(fetch_dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(*[self.get_fin_details(date_yyyymmdd=d) for d in chunk])
-            for yyyymmdd, df in zip(chunk, results):
-                if df.empty:
-                    continue
-                buff.append(df)
-                if cache_dir:
-                    cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.csv.gz"
-                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                    df.to_csv(cache_path, index=False)
+        results = await asyncio.gather(*[self.get_fin_details(date_yyyymmdd=d) for d in fetch_dates])
+        for yyyymmdd, df in zip(fetch_dates, results):
+            if df.empty:
+                continue
+            buff.append(df)
+            if cache_dir:
+                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.csv.gz"
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                df.to_csv(cache_path, index=False)
 
         if not buff:
             return pd.DataFrame()
@@ -763,11 +752,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[self.get_fin_dividend(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in chunk]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(*[self.get_fin_dividend(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["PubDate", "Code"]).reset_index(drop=True)
@@ -854,11 +840,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[self.get_mkt_short_ratio(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in chunk]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(*[self.get_mkt_short_ratio(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["Date", "S33"]).reset_index(drop=True)
@@ -922,11 +905,10 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[self.get_mkt_short_sale_report(disclosed_date=d.strftime("%Y-%m-%d")) for d in chunk]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(
+            *[self.get_mkt_short_sale_report(disclosed_date=d.strftime("%Y-%m-%d")) for d in dates]
+        )
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["DiscDate", "CalcDate", "Code"]).reset_index(drop=True)
@@ -985,11 +967,10 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[self.get_mkt_margin_interest(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in chunk]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(
+            *[self.get_mkt_margin_interest(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["Date", "Code"]).reset_index(drop=True)
@@ -1048,11 +1029,10 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[self.get_mkt_margin_alert(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in chunk]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(
+            *[self.get_mkt_margin_alert(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["PubDate", "Code"]).reset_index(drop=True)
@@ -1114,11 +1094,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[self.get_mkt_breakdown(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in chunk]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(*[self.get_mkt_breakdown(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
@@ -1338,18 +1315,17 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[
-                    self.get_drv_bars_daily_fut(
-                        date_yyyymmdd=d.strftime("%Y-%m-%d"),
-                        category=category,
-                        contract_flag=contract_flag,
-                    )
-                    for d in chunk
-                ]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(
+            *[
+                self.get_drv_bars_daily_fut(
+                    date_yyyymmdd=d.strftime("%Y-%m-%d"),
+                    category=category,
+                    contract_flag=contract_flag,
+                )
+                for d in dates
+            ]
+        )
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
@@ -1367,19 +1343,18 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[
-                    self.get_drv_bars_daily_opt(
-                        date_yyyymmdd=d.strftime("%Y-%m-%d"),
-                        category=category,
-                        contract_flag=contract_flag,
-                        code=code,
-                    )
-                    for d in chunk
-                ]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(
+            *[
+                self.get_drv_bars_daily_opt(
+                    date_yyyymmdd=d.strftime("%Y-%m-%d"),
+                    category=category,
+                    contract_flag=contract_flag,
+                    code=code,
+                )
+                for d in dates
+            ]
+        )
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
@@ -1394,11 +1369,10 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        for chunk in _chunked(dates, _RANGE_CHUNK_SIZE):
-            results = await asyncio.gather(
-                *[self.get_drv_bars_daily_opt_225(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in chunk]
-            )
-            buff.extend(df for df in results if not df.empty)
+        results = await asyncio.gather(
+            *[self.get_drv_bars_daily_opt_225(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
+        buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)

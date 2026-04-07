@@ -14,6 +14,16 @@ Async Python client for [JQuants API v2](https://jpx-jquants.com/).
 
 ## インストール
 
+### GitHubからのインストール
+
+アルファ版のため、バージョン管理されていません
+
+pip install git+https://github.com/getumen/async-jquants-api-client.git
+
+### TBD: PyPIによるインストール
+
+アルファ版のためPyPIにリリースされていません
+
 ```bash
 pip install async-jquants-api-client
 ```

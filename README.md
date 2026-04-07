@@ -4,7 +4,7 @@ Async Python client for [JQuants API v2](https://jpx-jquants.com/).
 
 [jquants-api-client-python](https://github.com/J-Quants/jquants-api-client-python) の以下の点を改善したライブラリです：
 
-- **スレッドセーフでない・`requests` ベース** → `httpx` + `asyncio` による完全非同期実装
+- **スレッドセーフでない・`requests.Session` ベース** → `httpx` + `asyncio` による完全非同期実装
 - **v2 のレートリミット未対応** → `aiolimiter` によるプラン別レートリミット対応
 
 ## 要件

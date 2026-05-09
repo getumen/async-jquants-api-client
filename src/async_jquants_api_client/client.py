@@ -671,7 +671,7 @@ class JQuantsClientV2:
         Args:
             start_dt: 取得開始日 (YYYYMMDD or YYYY-MM-DD)
             end_dt: 取得終了日 (YYYYMMDD or YYYY-MM-DD)
-            cache_dir: CSV形式のキャッシュファイルが存在するディレクトリ (未指定時はキャッシュしない)
+            cache_dir: Parquet形式のキャッシュファイルが存在するディレクトリ (未指定時はキャッシュしない)
         """
         dates = pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D")
         buff: list[pd.DataFrame] = []
@@ -679,12 +679,9 @@ class JQuantsClientV2:
 
         for d in dates:
             yyyymmdd = d.strftime("%Y%m%d")
-            cache_file = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.csv.gz"
+            cache_file = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.parquet"
             if cache_dir and os.path.isfile(cache_file):
-                df = pd.read_csv(cache_file, dtype=str)
-                if "DiscDate" in df.columns:
-                    df["DiscDate"] = pd.to_datetime(df["DiscDate"], errors="coerce")
-                buff.append(df)
+                buff.append(pd.read_parquet(cache_file))
             else:
                 fetch_dates.append(yyyymmdd)
 
@@ -693,9 +690,9 @@ class JQuantsClientV2:
             if not df.empty:
                 buff.append(df)
             if cache_dir:
-                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.csv.gz"
+                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.parquet"
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                df.to_csv(cache_path, index=False)
+                df.to_parquet(cache_path, index=False)
 
         if not buff:
             return pd.DataFrame()

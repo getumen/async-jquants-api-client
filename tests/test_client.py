@@ -903,3 +903,63 @@ def test_aggregate_bars_n_minute_empty() -> None:
     df = pd.DataFrame(columns=["Date", "Time", "Code", "O", "H", "L", "C", "Vo", "Va"])
     result = _aggregate_bars_n_minute(df, n=5)
     assert result.empty
+
+
+# ------------------------------------------------------------------
+# bulk
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_bulk_list_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {"Key": "equities/master/20240101.csv.gz", "Size": 1024, "LastModified": "2024-01-02T00:00:00Z"},
+                {"Key": "equities/master/20240102.csv.gz", "Size": 2048, "LastModified": "2024-01-03T00:00:00Z"},
+            ]
+        },
+    )
+    from async_jquants_api_client import BulkEndpoint
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_bulk_list(BulkEndpoint.EQ_MASTER)
+    assert isinstance(df, pd.DataFrame)
+    assert list(df.columns) == ["Key", "Size", "LastModified"]
+    assert len(df) == 2
+    assert df.iloc[0]["Key"] == "equities/master/20240101.csv.gz"
+    assert df.iloc[0]["LastModified"] == pd.Timestamp("2024-01-02T00:00:00Z")
+
+
+@pytest.mark.asyncio
+async def test_get_bulk_list_accepts_string_endpoint(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_bulk_list("/equities/master")
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+    request = httpx_mock.get_requests()[-1]
+    assert dict(request.url.params) == {"endpoint": "/equities/master"}
+
+
+@pytest.mark.asyncio
+async def test_get_bulk_list_sends_correct_endpoint_param(httpx_mock: HTTPXMock) -> None:
+    from async_jquants_api_client import BulkEndpoint
+
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        await client.get_bulk_list(BulkEndpoint.EQ_BARS_DAILY)
+    request = httpx_mock.get_requests()[-1]
+    assert dict(request.url.params) == {"endpoint": "/equities/bars/daily"}
+
+
+@pytest.mark.asyncio
+async def test_get_bulk_returns_url(httpx_mock: HTTPXMock) -> None:
+    expected_url = "https://example.com/bulk/equities/master/20240101.csv.gz"
+    httpx_mock.add_response(status_code=200, json={"url": expected_url})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        url = await client.get_bulk("equities/master/20240101.csv.gz")
+    assert url == expected_url
+    request = httpx_mock.get_requests()[-1]
+    assert dict(request.url.params) == {"key": "equities/master/20240101.csv.gz"}

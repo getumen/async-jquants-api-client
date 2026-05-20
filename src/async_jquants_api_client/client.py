@@ -138,7 +138,7 @@ class JQuantsClientV2:
     async def _get_with_retry(
         self, path: str, params: dict, limiter: aiolimiter.AsyncLimiter | None = None
     ) -> httpx.Response:
-        async with (limiter or self._limiter):
+        async with limiter or self._limiter:
             response = await self._http.get(path, params=params)
         if response.status_code in (401, 403):
             raise JQuantsAuthError(f"Authentication failed: {response.status_code}")

@@ -14,7 +14,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from . import constants
 from .exceptions import JQuantsAPIError, JQuantsAuthError
-from .plans import Plan
+from .plans import BulkEndpoint, Plan
 
 _RATE_LIMITS: dict[Plan, int] = {
     Plan.FREE: 5,
@@ -22,6 +22,8 @@ _RATE_LIMITS: dict[Plan, int] = {
     Plan.STANDARD: 120,
     Plan.PREMIUM: 500,
 }
+
+_ADDON_RATE_LIMIT = 60
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -89,6 +91,7 @@ class JQuantsClientV2:
             timeout=30.0,
         )
         self._limiter = aiolimiter.AsyncLimiter(1, 60 / _RATE_LIMITS[plan])
+        self._addon_limiter = aiolimiter.AsyncLimiter(1, 60 / _ADDON_RATE_LIMIT)
 
     def _is_colab(self) -> bool:
         return "google.colab" in sys.modules
@@ -132,8 +135,10 @@ class JQuantsClientV2:
         stop=stop_after_attempt(3),
         reraise=True,
     )
-    async def _get_with_retry(self, path: str, params: dict) -> httpx.Response:
-        async with self._limiter:
+    async def _get_with_retry(
+        self, path: str, params: dict, limiter: aiolimiter.AsyncLimiter | None = None
+    ) -> httpx.Response:
+        async with limiter or self._limiter:
             response = await self._http.get(path, params=params)
         if response.status_code in (401, 403):
             raise JQuantsAuthError(f"Authentication failed: {response.status_code}")
@@ -146,17 +151,19 @@ class JQuantsClientV2:
         response.raise_for_status()
         return response
 
-    async def _get(self, path: str, params: dict) -> httpx.Response:
+    async def _get(self, path: str, params: dict, limiter: aiolimiter.AsyncLimiter | None = None) -> httpx.Response:
         try:
-            return await self._get_with_retry(path, params)
+            return await self._get_with_retry(path, params, limiter=limiter)
         except httpx.HTTPStatusError as e:
             raise JQuantsAPIError(e.response.status_code, e.response.text) from e
 
-    async def _paginate(self, path: str, params: dict) -> AsyncGenerator[dict, None]:
+    async def _paginate(
+        self, path: str, params: dict, limiter: aiolimiter.AsyncLimiter | None = None
+    ) -> AsyncGenerator[dict, None]:
         pagination_key: str | None = None
         while True:
             current_params = params if pagination_key is None else {**params, "pagination_key": pagination_key}
-            body = (await self._get(path, current_params)).json()
+            body = (await self._get(path, current_params, limiter=limiter)).json()
             for item in body["data"]:
                 yield item
             pagination_key = body.get("pagination_key")
@@ -392,7 +399,9 @@ class JQuantsClientV2:
             if to_yyyymmdd:
                 params["to"] = to_yyyymmdd
 
-        all_data = [item async for item in self._paginate("/equities/bars/minute", params=params)]
+        all_data = [
+            item async for item in self._paginate("/equities/bars/minute", params=params, limiter=self._addon_limiter)
+        ]
 
         cols = constants.EQ_BARS_MINUTE_COLUMNS_V2
         if not all_data:
@@ -1376,3 +1385,56 @@ class JQuantsClientV2:
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # bulk (/bulk/list, /bulk/get)
+    # ------------------------------------------------------------------
+
+    async def get_bulk_list(self, endpoint: BulkEndpoint | str) -> pd.DataFrame:
+        """
+        バルクデータの一覧取得 (v2: /bulk/list)
+
+        Args:
+            endpoint: 対象エンドポイント (BulkEndpoint enum または文字列, 例: "/equities/master")
+        Returns:
+            pd.DataFrame: Key, Size, LastModified 列を持つデータフレーム
+        """
+        endpoint_value = endpoint.value if isinstance(endpoint, BulkEndpoint) else endpoint
+        params: dict[str, Any] = {"endpoint": endpoint_value}
+        body = (await self._get("/bulk/list", params)).json()
+        data = body.get("data", [])
+        if not data:
+            return pd.DataFrame(columns=constants.BULK_LIST_COLUMNS_V2)
+        df = pd.DataFrame.from_records(data)
+        if "LastModified" in df.columns:
+            df["LastModified"] = pd.to_datetime(df["LastModified"], errors="coerce")
+        return df[constants.BULK_LIST_COLUMNS_V2].reset_index(drop=True)
+
+    async def get_bulk(self, key: str) -> str:
+        """
+        バルクデータのダウンロード URL 取得 (v2: /bulk/get)
+
+        Args:
+            key: get_bulk_list() の Key 列の値
+        Returns:
+            str: ダウンロード URL
+        """
+        body = (await self._get("/bulk/get", {"key": key})).json()
+        return body["url"]
+
+    async def download_bulk(self, key: str, output_path: str) -> None:
+        """
+        バルクデータをファイルにダウンロード
+
+        Args:
+            key: get_bulk_list() の Key 列の値
+            output_path: 保存先ファイルパス
+        """
+        url = await self.get_bulk(key)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                with open(output_path, "wb") as f:
+                    async for chunk in response.aiter_bytes(chunk_size=8192):
+                        f.write(chunk)

@@ -24,6 +24,7 @@ _RATE_LIMITS: dict[Plan, int] = {
 }
 
 _ADDON_RATE_LIMIT = 60
+_FINS_RATE_LIMIT = 60
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -92,6 +93,7 @@ class JQuantsClientV2:
         )
         self._limiter = aiolimiter.AsyncLimiter(1, 60 / _RATE_LIMITS[plan])
         self._addon_limiter = aiolimiter.AsyncLimiter(1, 60 / _ADDON_RATE_LIMIT)
+        self._fins_limiter = aiolimiter.AsyncLimiter(1, 60 / _FINS_RATE_LIMIT)
 
     def _is_colab(self) -> bool:
         return "google.colab" in sys.modules
@@ -542,7 +544,7 @@ class JQuantsClientV2:
         if date_yyyymmdd:
             params["date"] = date_yyyymmdd
 
-        all_data = [item async for item in self._paginate("/fins/summary", params=params)]
+        all_data = [item async for item in self._paginate("/fins/summary", params=params, limiter=self._fins_limiter)]
 
         if not all_data:
             return pd.DataFrame(columns=constants.FIN_SUMMARY_COLUMNS_V2)
@@ -609,9 +611,8 @@ class JQuantsClientV2:
 
         results = await asyncio.gather(*[self.get_fin_summary(date_yyyymmdd=d) for d in fetch_dates])
         for yyyymmdd, df in zip(fetch_dates, results):
-            if df.empty:
-                continue
-            buff.append(df)
+            if not df.empty:
+                buff.append(df)
             if cache_dir:
                 cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_summary_{yyyymmdd}.csv.gz"
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -645,7 +646,7 @@ class JQuantsClientV2:
         if date_yyyymmdd:
             params["date"] = date_yyyymmdd
 
-        all_data = [item async for item in self._paginate("/fins/details", params=params)]
+        all_data = [item async for item in self._paginate("/fins/details", params=params, limiter=self._fins_limiter)]
 
         if not all_data:
             return pd.DataFrame(columns=constants.FINS_FS_DETAILS_COLUMNS_V2)
@@ -689,9 +690,8 @@ class JQuantsClientV2:
 
         results = await asyncio.gather(*[self.get_fin_details(date_yyyymmdd=d) for d in fetch_dates])
         for yyyymmdd, df in zip(fetch_dates, results):
-            if df.empty:
-                continue
-            buff.append(df)
+            if not df.empty:
+                buff.append(df)
             if cache_dir:
                 cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.csv.gz"
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)

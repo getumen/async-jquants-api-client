@@ -452,12 +452,12 @@ async def test_get_fin_details_range_uses_cache(tmp_path: Any) -> None:
         "Code": "5678",
         "DiscNo": "1",
         "DocType": "X",
-        "FS": {},
+        "FS": {"NetSales": "1000000"},
     }
     df_cached = pd.DataFrame([row])
     cache_dir = str(tmp_path)
     os.makedirs(f"{cache_dir}/2024", exist_ok=True)
-    df_cached.to_csv(f"{cache_dir}/2024/v2_fin_details_20240105.csv.gz", index=False)
+    df_cached.to_parquet(f"{cache_dir}/2024/v2_fin_details_20240105.parquet", index=False)
 
     async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_fin_details_range("20240105", "20240105", cache_dir=cache_dir)

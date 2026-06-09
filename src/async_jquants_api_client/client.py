@@ -38,6 +38,14 @@ def _is_retryable(exc: BaseException) -> bool:
     return isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
 
 
+def _read_fin_summary_cache(path: str, date_cols: list[str]) -> pd.DataFrame:
+    df = pd.read_csv(path, dtype=str)
+    for col in date_cols:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
 def _aggregate_bars_n_minute(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     """1分足データをn分足に集約する"""
     if df.empty:
@@ -594,20 +602,21 @@ class JQuantsClientV2:
         ]
 
         dates = pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D")
-        buff: list[pd.DataFrame] = []
+        cached_files: list[str] = []
         fetch_dates: list[str] = []
 
         for d in dates:
             yyyymmdd = d.strftime("%Y%m%d")
             cache_file = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_summary_{yyyymmdd}.csv.gz"
             if cache_dir and os.path.isfile(cache_file):
-                df = pd.read_csv(cache_file, dtype=str)
-                for col in _DATE_COLS:
-                    if col in df.columns:
-                        df[col] = pd.to_datetime(df[col], errors="coerce")
-                buff.append(df)
+                cached_files.append(cache_file)
             else:
                 fetch_dates.append(yyyymmdd)
+
+        cache_dfs = await asyncio.gather(
+            *[asyncio.to_thread(_read_fin_summary_cache, path, _DATE_COLS) for path in cached_files]
+        )
+        buff: list[pd.DataFrame] = list(cache_dfs)
 
         results = await asyncio.gather(*[self.get_fin_summary(date_yyyymmdd=d) for d in fetch_dates])
         for yyyymmdd, df in zip(fetch_dates, results):
@@ -671,31 +680,31 @@ class JQuantsClientV2:
         Args:
             start_dt: 取得開始日 (YYYYMMDD or YYYY-MM-DD)
             end_dt: 取得終了日 (YYYYMMDD or YYYY-MM-DD)
-            cache_dir: CSV形式のキャッシュファイルが存在するディレクトリ (未指定時はキャッシュしない)
+            cache_dir: Parquet形式のキャッシュファイルが存在するディレクトリ (未指定時はキャッシュしない)
         """
         dates = pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D")
-        buff: list[pd.DataFrame] = []
+        cached_files: list[str] = []
         fetch_dates: list[str] = []
 
         for d in dates:
             yyyymmdd = d.strftime("%Y%m%d")
-            cache_file = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.csv.gz"
+            cache_file = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.parquet"
             if cache_dir and os.path.isfile(cache_file):
-                df = pd.read_csv(cache_file, dtype=str)
-                if "DiscDate" in df.columns:
-                    df["DiscDate"] = pd.to_datetime(df["DiscDate"], errors="coerce")
-                buff.append(df)
+                cached_files.append(cache_file)
             else:
                 fetch_dates.append(yyyymmdd)
+
+        cache_dfs = await asyncio.gather(*[asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
+        buff: list[pd.DataFrame] = list(cache_dfs)
 
         results = await asyncio.gather(*[self.get_fin_details(date_yyyymmdd=d) for d in fetch_dates])
         for yyyymmdd, df in zip(fetch_dates, results):
             if not df.empty:
                 buff.append(df)
             if cache_dir:
-                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.csv.gz"
+                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.parquet"
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                df.to_csv(cache_path, index=False)
+                df.to_parquet(cache_path, index=False)
 
         if not buff:
             return pd.DataFrame()

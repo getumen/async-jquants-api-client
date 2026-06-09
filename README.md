@@ -70,6 +70,8 @@ asyncio.run(main())
 | LIGHT | 60 |
 | STANDARD | 120 |
 | PREMIUM | 500 |
+| fins/summary (全プラン共通) | 60 |
+| fins/details (全プラン共通) | 60 |
 
 ```python
 from async_jquants_api_client import JQuantsClientV2, Plan

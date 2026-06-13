@@ -3,7 +3,25 @@ name = "async-jquants-api-client"
 version = "0.1.0"
 description = "Async Python client for JQuants API"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    {name = "getumen"},
+]
 requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Typing :: Typed",
+]
 dependencies = [
     "aiolimiter >= 1.1.0",
     "httpx >= 0.23.0",
@@ -12,6 +30,9 @@ dependencies = [
     "pyarrow >= 14.0.0",
 ]
 
+
+[project.urls]
+Repository = "https://github.com/getumen/async-jquants-api-client"
 
 [build-system]
 requires = ["hatchling"]

@@ -14,18 +14,14 @@ Async Python client for [JQuants API v2](https://jpx-jquants.com/).
 
 ## インストール
 
-### GitHubからのインストール
-
-アルファ版のため、バージョン管理されていません
-
-pip install git+https://github.com/getumen/async-jquants-api-client.git
-
-### TBD: PyPIによるインストール
-
-アルファ版のためPyPIにリリースされていません
-
 ```bash
 pip install async-jquants-api-client
+```
+
+### GitHubからの開発版インストール
+
+```bash
+pip install git+https://github.com/getumen/async-jquants-api-client.git
 ```
 
 ## 設定
@@ -196,16 +192,25 @@ df = client.get_market_segments()
 
 ## キャッシュ
 
-`get_fin_summary_range` と `get_fin_details_range` は `cache_dir` を指定することで日付ごとに CSV.gz ファイルとしてキャッシュできます。
+`get_fin_summary_range` と `get_fin_details_range` は `cache_dir` を指定することで日付ごとにキャッシュできます。
 
 ```python
 df = await client.get_fin_summary_range(
     "20200101", "20240131",
     cache_dir="/path/to/cache"
 )
+df = await client.get_fin_details_range(
+    "20200101", "20240131",
+    cache_dir="/path/to/cache"
+)
 ```
 
-キャッシュファイルは `{cache_dir}/{yyyy}/v2_fin_summary_{yyyymmdd}.csv.gz` の形式で保存されます。
+キャッシュファイルのパス形式：
+
+| メソッド | 形式 | パス |
+|---------|------|------|
+| `get_fin_summary_range` | CSV.gz | `{cache_dir}/{yyyy}/v2_fin_summary_{yyyymmdd}.csv.gz` |
+| `get_fin_details_range` | Parquet | `{cache_dir}/{yyyy}/v2_fin_details_{yyyymmdd}.parquet` |
 
 ## エラーハンドリング
 

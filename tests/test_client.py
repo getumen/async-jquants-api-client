@@ -642,6 +642,17 @@ async def test_get_edinet_major_shareholders_returns_dataframe(httpx_mock: HTTPX
     assert df.iloc[0]["SubDate"] == pd.Timestamp("2025-06-20")
     assert df.iloc[0]["Hldrs"][0]["HldrName"] == "日本マスタートラスト信託銀行株式会社"
     assert df.iloc[0]["Hldrs"][0]["Rank"] == 1
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "86970"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_major_shareholders_raises_on_edinet_code_and_code(
+    httpx_mock: HTTPXMock,
+) -> None:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(ValueError, match="edinet_code"):
+            await client.get_edinet_major_shareholders(edinet_code="E03814", code="86970")
+    assert len(httpx_mock.get_requests()) == 0
 
 
 @pytest.mark.asyncio
@@ -653,6 +664,7 @@ async def test_get_edinet_major_shareholders_returns_empty_dataframe_with_column
         df = await client.get_edinet_major_shareholders(code="86970")
     assert df.empty
     assert list(df.columns) == EDINET_MAJOR_SHAREHOLDERS_COLUMNS_V2
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "86970"}
 
 
 @pytest.mark.asyncio
@@ -671,6 +683,8 @@ async def test_get_edinet_major_shareholders_range_concatenates_dates(
         df = await client.get_edinet_major_shareholders_range(start_dt="2025-06-19", end_dt="2025-06-20")
     assert len(df) == 2
     assert list(df["DocId"]) == ["A", "B"]
+    requested_dates = {dict(r.url.params)["date"] for r in httpx_mock.get_requests()}
+    assert requested_dates == {"2025-06-19", "2025-06-20"}
 
 
 # ------------------------------------------------------------------
@@ -721,6 +735,17 @@ async def test_get_edinet_cross_shareholdings_returns_dataframe(httpx_mock: HTTP
     assert df.iloc[0]["Code"] == "86970"
     assert df.iloc[0]["SubDate"] == pd.Timestamp("2025-06-20")
     assert df.iloc[0]["Report"]["Spec"][0]["IsrName"] == "サンプル株式会社"
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "86970"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_cross_shareholdings_raises_on_edinet_code_and_code(
+    httpx_mock: HTTPXMock,
+) -> None:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(ValueError, match="edinet_code"):
+            await client.get_edinet_cross_shareholdings(edinet_code="E03814", code="86970")
+    assert len(httpx_mock.get_requests()) == 0
 
 
 @pytest.mark.asyncio
@@ -732,6 +757,7 @@ async def test_get_edinet_cross_shareholdings_returns_empty_dataframe_with_colum
         df = await client.get_edinet_cross_shareholdings(edinet_code="E03814")
     assert df.empty
     assert list(df.columns) == EDINET_CROSS_SHAREHOLDINGS_COLUMNS_V2
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"edinet_code": "E03814"}
 
 
 @pytest.mark.asyncio
@@ -750,6 +776,8 @@ async def test_get_edinet_cross_shareholdings_range_concatenates_dates(
         df = await client.get_edinet_cross_shareholdings_range(start_dt="2025-06-19", end_dt="2025-06-20")
     assert len(df) == 2
     assert list(df["DocId"]) == ["A", "B"]
+    requested_dates = {dict(r.url.params)["date"] for r in httpx_mock.get_requests()}
+    assert requested_dates == {"2025-06-19", "2025-06-20"}
 
 
 # ------------------------------------------------------------------
@@ -802,6 +830,17 @@ async def test_get_edinet_large_volume_shareholders_returns_dataframe(
     assert df.iloc[0]["SubDate"] == pd.Timestamp("2025-06-20")
     assert df.iloc[0]["TotalShsRatio"] == 0.05
     assert df.iloc[0]["Hldrs"][0]["HldrName"] == "サンプル投資顧問株式会社"
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "12345"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_large_volume_shareholders_raises_on_edinet_code_and_code(
+    httpx_mock: HTTPXMock,
+) -> None:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(ValueError, match="edinet_code"):
+            await client.get_edinet_large_volume_shareholders(edinet_code="E00001", code="12345")
+    assert len(httpx_mock.get_requests()) == 0
 
 
 @pytest.mark.asyncio
@@ -813,6 +852,7 @@ async def test_get_edinet_large_volume_shareholders_returns_empty_dataframe_with
         df = await client.get_edinet_large_volume_shareholders(code="12345")
     assert df.empty
     assert list(df.columns) == EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "12345"}
 
 
 @pytest.mark.asyncio
@@ -831,6 +871,8 @@ async def test_get_edinet_large_volume_shareholders_range_concatenates_dates(
         df = await client.get_edinet_large_volume_shareholders_range(start_dt="2025-06-19", end_dt="2025-06-20")
     assert len(df) == 2
     assert list(df["DocId"]) == ["A", "B"]
+    requested_dates = {dict(r.url.params)["date"] for r in httpx_mock.get_requests()}
+    assert requested_dates == {"2025-06-19", "2025-06-20"}
 
 
 # ------------------------------------------------------------------

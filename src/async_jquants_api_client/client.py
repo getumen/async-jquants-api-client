@@ -25,6 +25,7 @@ _RATE_LIMITS: dict[Plan, int] = {
 
 _ADDON_RATE_LIMIT = 60
 _FINS_RATE_LIMIT = 60
+_EDINET_RATE_LIMIT = 60
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -102,6 +103,7 @@ class JQuantsClientV2:
         self._limiter = aiolimiter.AsyncLimiter(1, 60 / _RATE_LIMITS[plan])
         self._addon_limiter = aiolimiter.AsyncLimiter(1, 60 / _ADDON_RATE_LIMIT)
         self._fins_limiter = aiolimiter.AsyncLimiter(1, 60 / _FINS_RATE_LIMIT)
+        self._edinet_limiter = aiolimiter.AsyncLimiter(1, 60 / _EDINET_RATE_LIMIT)
 
     def _is_colab(self) -> bool:
         return "google.colab" in sys.modules
@@ -1073,7 +1075,12 @@ class JQuantsClientV2:
             date_yyyymmdd: 提出日
         Returns:
             pd.DataFrame: 大株主状況データ (Hldrs列に大株主配列を含む)
+        Raises:
+            ValueError: edinet_code と code を同時に指定した場合
         """
+        if edinet_code and code:
+            raise ValueError("edinet_code と code は同時に指定できません")
+
         params: dict[str, Any] = {}
         if edinet_code:
             params["edinet_code"] = edinet_code
@@ -1082,7 +1089,10 @@ class JQuantsClientV2:
         if date_yyyymmdd:
             params["date"] = date_yyyymmdd
 
-        all_data = [item async for item in self._paginate("/edinet/major-shareholders", params=params)]
+        all_data = [
+            item
+            async for item in self._paginate("/edinet/major-shareholders", params=params, limiter=self._edinet_limiter)
+        ]
 
         if not all_data:
             return pd.DataFrame(columns=constants.EDINET_MAJOR_SHAREHOLDERS_COLUMNS_V2)
@@ -1132,7 +1142,12 @@ class JQuantsClientV2:
         Returns:
             pd.DataFrame: 政策保有株式データ
                 (Report/Largest/SecondLargest列に保有主体ブロックを含む)
+        Raises:
+            ValueError: edinet_code と code を同時に指定した場合
         """
+        if edinet_code and code:
+            raise ValueError("edinet_code と code は同時に指定できません")
+
         params: dict[str, Any] = {}
         if edinet_code:
             params["edinet_code"] = edinet_code
@@ -1141,7 +1156,10 @@ class JQuantsClientV2:
         if date_yyyymmdd:
             params["date"] = date_yyyymmdd
 
-        all_data = [item async for item in self._paginate("/edinet/cross-shareholdings", params=params)]
+        all_data = [
+            item
+            async for item in self._paginate("/edinet/cross-shareholdings", params=params, limiter=self._edinet_limiter)
+        ]
 
         if not all_data:
             return pd.DataFrame(columns=constants.EDINET_CROSS_SHAREHOLDINGS_COLUMNS_V2)
@@ -1190,7 +1208,12 @@ class JQuantsClientV2:
             date_yyyymmdd: 提出日
         Returns:
             pd.DataFrame: 大量保有報告書データ (Hldrs列に保有者配列を含む)
+        Raises:
+            ValueError: edinet_code と code を同時に指定した場合
         """
+        if edinet_code and code:
+            raise ValueError("edinet_code と code は同時に指定できません")
+
         params: dict[str, Any] = {}
         if edinet_code:
             params["edinet_code"] = edinet_code
@@ -1199,7 +1222,12 @@ class JQuantsClientV2:
         if date_yyyymmdd:
             params["date"] = date_yyyymmdd
 
-        all_data = [item async for item in self._paginate("/edinet/large-volume-shareholders", params=params)]
+        all_data = [
+            item
+            async for item in self._paginate(
+                "/edinet/large-volume-shareholders", params=params, limiter=self._edinet_limiter
+            )
+        ]
 
         if not all_data:
             return pd.DataFrame(columns=constants.EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2)

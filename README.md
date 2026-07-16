@@ -155,6 +155,22 @@ df = await client.get_mkt_calendar(from_yyyymmdd="20240101", to_yyyymmdd="202401
 df = await client.get_eq_investor_types(section="TSEPrime")
 ```
 
+### EDINET
+
+```python
+# 大株主状況
+df = await client.get_edinet_major_shareholders(code="86970")
+df = await client.get_edinet_major_shareholders_range("20240101", "20240131")
+
+# 政策保有株式
+df = await client.get_edinet_cross_shareholdings(code="86970")
+df = await client.get_edinet_cross_shareholdings_range("20240101", "20240131")
+
+# 大量保有報告書
+df = await client.get_edinet_large_volume_shareholders(code="86970")
+df = await client.get_edinet_large_volume_shareholders_range("20240101", "20240131")
+```
+
 ### 指数
 
 ```python

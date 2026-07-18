@@ -55,7 +55,7 @@ def _aggregate_bars_n_minute(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     df = df.copy()
 
     df["DateTime"] = pd.to_datetime(
-        df["Date"].astype(str) + " " + df["Time"].astype(str),
+        df["Date"].astype(str).str.cat(df["Time"].astype(str), sep=" "),
         errors="coerce",
     )
     df["TimeGroup"] = df["DateTime"].dt.floor(f"{n}min")

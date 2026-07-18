@@ -25,6 +25,7 @@ _RATE_LIMITS: dict[Plan, int] = {
 
 _ADDON_RATE_LIMIT = 60
 _FINS_RATE_LIMIT = 60
+_EDINET_RATE_LIMIT = 60
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -54,7 +55,7 @@ def _aggregate_bars_n_minute(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     df = df.copy()
 
     df["DateTime"] = pd.to_datetime(
-        df["Date"].astype(str) + " " + df["Time"].astype(str),
+        df["Date"].astype(str).str.cat(df["Time"].astype(str), sep=" "),
         errors="coerce",
     )
     df["TimeGroup"] = df["DateTime"].dt.floor(f"{n}min")
@@ -102,6 +103,7 @@ class JQuantsClientV2:
         self._limiter = aiolimiter.AsyncLimiter(1, 60 / _RATE_LIMITS[plan])
         self._addon_limiter = aiolimiter.AsyncLimiter(1, 60 / _ADDON_RATE_LIMIT)
         self._fins_limiter = aiolimiter.AsyncLimiter(1, 60 / _FINS_RATE_LIMIT)
+        self._edinet_limiter = aiolimiter.AsyncLimiter(1, 60 / _EDINET_RATE_LIMIT)
 
     def _is_colab(self) -> bool:
         return "google.colab" in sys.modules
@@ -1054,6 +1056,207 @@ class JQuantsClientV2:
         if not buff:
             return pd.DataFrame()
         return pd.concat(buff).sort_values(["PubDate", "Code"]).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # /edinet/major-shareholders
+    # ------------------------------------------------------------------
+    async def get_edinet_major_shareholders(
+        self,
+        edinet_code: str = "",
+        code: str = "",
+        date_yyyymmdd: str = "",
+    ) -> pd.DataFrame:
+        """
+        大株主状況 (v2: /edinet/major-shareholders)
+
+        Args:
+            edinet_code: EDINETコード (codeと同時指定不可)
+            code: 銘柄コード (edinet_codeと同時指定不可)
+            date_yyyymmdd: 提出日
+        Returns:
+            pd.DataFrame: 大株主状況データ (Hldrs列に大株主配列を含む)
+        Raises:
+            ValueError: edinet_code と code を同時に指定した場合
+        """
+        if edinet_code and code:
+            raise ValueError("edinet_code と code は同時に指定できません")
+
+        params: dict[str, Any] = {}
+        if edinet_code:
+            params["edinet_code"] = edinet_code
+        if code:
+            params["code"] = code
+        if date_yyyymmdd:
+            params["date"] = date_yyyymmdd
+
+        all_data = [
+            item
+            async for item in self._paginate("/edinet/major-shareholders", params=params, limiter=self._edinet_limiter)
+        ]
+
+        if not all_data:
+            return pd.DataFrame(columns=constants.EDINET_MAJOR_SHAREHOLDERS_COLUMNS_V2)
+
+        df = pd.DataFrame.from_records(all_data)
+        if "SubDate" in df.columns:
+            df["SubDate"] = pd.to_datetime(df["SubDate"], errors="coerce")
+        sort_cols = [c for c in ["SubDate", "Code"] if c in df.columns]
+        if sort_cols:
+            df.sort_values(sort_cols, inplace=True)
+        return df.reset_index(drop=True)
+
+    async def get_edinet_major_shareholders_range(
+        self,
+        start_dt: DatetimeLike = "20170101",
+        end_dt: DatetimeLike | None = None,
+    ) -> pd.DataFrame:
+        """
+        大株主状況を日付範囲指定して取得 (v2: /edinet/major-shareholders)
+        """
+        dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
+        buff: list[pd.DataFrame] = []
+        results = await asyncio.gather(
+            *[self.get_edinet_major_shareholders(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
+        buff.extend(df for df in results if not df.empty)
+        if not buff:
+            return pd.DataFrame()
+        return pd.concat(buff).sort_values(["SubDate", "Code"]).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # /edinet/cross-shareholdings
+    # ------------------------------------------------------------------
+    async def get_edinet_cross_shareholdings(
+        self,
+        edinet_code: str = "",
+        code: str = "",
+        date_yyyymmdd: str = "",
+    ) -> pd.DataFrame:
+        """
+        政策保有株式 (v2: /edinet/cross-shareholdings)
+
+        Args:
+            edinet_code: EDINETコード (codeと同時指定不可)
+            code: 銘柄コード (edinet_codeと同時指定不可)
+            date_yyyymmdd: 提出日
+        Returns:
+            pd.DataFrame: 政策保有株式データ
+                (Report/Largest/SecondLargest列に保有主体ブロックを含む)
+        Raises:
+            ValueError: edinet_code と code を同時に指定した場合
+        """
+        if edinet_code and code:
+            raise ValueError("edinet_code と code は同時に指定できません")
+
+        params: dict[str, Any] = {}
+        if edinet_code:
+            params["edinet_code"] = edinet_code
+        if code:
+            params["code"] = code
+        if date_yyyymmdd:
+            params["date"] = date_yyyymmdd
+
+        all_data = [
+            item
+            async for item in self._paginate("/edinet/cross-shareholdings", params=params, limiter=self._edinet_limiter)
+        ]
+
+        if not all_data:
+            return pd.DataFrame(columns=constants.EDINET_CROSS_SHAREHOLDINGS_COLUMNS_V2)
+
+        df = pd.DataFrame.from_records(all_data)
+        if "SubDate" in df.columns:
+            df["SubDate"] = pd.to_datetime(df["SubDate"], errors="coerce")
+        sort_cols = [c for c in ["SubDate", "Code"] if c in df.columns]
+        if sort_cols:
+            df.sort_values(sort_cols, inplace=True)
+        return df.reset_index(drop=True)
+
+    async def get_edinet_cross_shareholdings_range(
+        self,
+        start_dt: DatetimeLike = "20170101",
+        end_dt: DatetimeLike | None = None,
+    ) -> pd.DataFrame:
+        """
+        政策保有株式を日付範囲指定して取得 (v2: /edinet/cross-shareholdings)
+        """
+        dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
+        buff: list[pd.DataFrame] = []
+        results = await asyncio.gather(
+            *[self.get_edinet_cross_shareholdings(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
+        buff.extend(df for df in results if not df.empty)
+        if not buff:
+            return pd.DataFrame()
+        return pd.concat(buff).sort_values(["SubDate", "Code"]).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # /edinet/large-volume-shareholders
+    # ------------------------------------------------------------------
+    async def get_edinet_large_volume_shareholders(
+        self,
+        edinet_code: str = "",
+        code: str = "",
+        date_yyyymmdd: str = "",
+    ) -> pd.DataFrame:
+        """
+        大量保有報告書 (v2: /edinet/large-volume-shareholders)
+
+        Args:
+            edinet_code: 発行者のEDINETコード (codeと同時指定不可)
+            code: 発行者の銘柄コード (edinet_codeと同時指定不可)
+            date_yyyymmdd: 提出日
+        Returns:
+            pd.DataFrame: 大量保有報告書データ (Hldrs列に保有者配列を含む)
+        Raises:
+            ValueError: edinet_code と code を同時に指定した場合
+        """
+        if edinet_code and code:
+            raise ValueError("edinet_code と code は同時に指定できません")
+
+        params: dict[str, Any] = {}
+        if edinet_code:
+            params["edinet_code"] = edinet_code
+        if code:
+            params["code"] = code
+        if date_yyyymmdd:
+            params["date"] = date_yyyymmdd
+
+        all_data = [
+            item
+            async for item in self._paginate(
+                "/edinet/large-volume-shareholders", params=params, limiter=self._edinet_limiter
+            )
+        ]
+
+        if not all_data:
+            return pd.DataFrame(columns=constants.EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2)
+
+        df = pd.DataFrame.from_records(all_data)
+        if "SubDate" in df.columns:
+            df["SubDate"] = pd.to_datetime(df["SubDate"], errors="coerce")
+        sort_cols = [c for c in ["SubDate", "Code"] if c in df.columns]
+        if sort_cols:
+            df.sort_values(sort_cols, inplace=True)
+        return df.reset_index(drop=True)
+
+    async def get_edinet_large_volume_shareholders_range(
+        self,
+        start_dt: DatetimeLike = "20170101",
+        end_dt: DatetimeLike | None = None,
+    ) -> pd.DataFrame:
+        """
+        大量保有報告書を日付範囲指定して取得 (v2: /edinet/large-volume-shareholders)
+        """
+        dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
+        buff: list[pd.DataFrame] = []
+        results = await asyncio.gather(
+            *[self.get_edinet_large_volume_shareholders(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
+        buff.extend(df for df in results if not df.empty)
+        if not buff:
+            return pd.DataFrame()
+        return pd.concat(buff).sort_values(["SubDate", "Code"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # /markets/breakdown (path_old: /markets/breakdown)

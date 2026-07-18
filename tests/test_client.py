@@ -9,7 +9,13 @@ from pytest_httpx import HTTPXMock
 
 from async_jquants_api_client import JQuantsAPIError, JQuantsAuthError, JQuantsClientV2, Plan
 from async_jquants_api_client.client import _aggregate_bars_n_minute
-from async_jquants_api_client.constants import FIN_SUMMARY_COLUMNS_V2, FINS_DIVIDEND_COLUMNS_V2
+from async_jquants_api_client.constants import (
+    EDINET_CROSS_SHAREHOLDINGS_COLUMNS_V2,
+    EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2,
+    EDINET_MAJOR_SHAREHOLDERS_COLUMNS_V2,
+    FIN_SUMMARY_COLUMNS_V2,
+    FINS_DIVIDEND_COLUMNS_V2,
+)
 
 
 def test_client_init(client: JQuantsClientV2) -> None:
@@ -591,6 +597,282 @@ async def test_get_mkt_margin_alert_returns_dataframe(httpx_mock: HTTPXMock) -> 
     assert df.iloc[0]["PubDate"] == pd.Timestamp("2024-02-08")
     assert df.iloc[0]["ShrtOut"] == 11.0
     assert df.iloc[0]["SLRatio"] == 1.6
+
+
+# ------------------------------------------------------------------
+# edinet-major-shareholders
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_major_shareholders_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "DocId": "S100XXXX",
+                    "Code": "86970",
+                    "EdinetCode": "E03814",
+                    "FilerName": "株式会社日本取引所グループ",
+                    "FilerNameEn": "Japan Exchange Group, Inc.",
+                    "DocTypeCode": "120",
+                    "SubDate": "2025-06-20",
+                    "SubTime": "09:00",
+                    "PerSt": "2024-04-01",
+                    "PerEn": "2025-03-31",
+                    "Hldrs": [
+                        {
+                            "Rank": 1,
+                            "HldrName": "日本マスタートラスト信託銀行株式会社",
+                            "HldrAddr": "東京都港区",
+                            "ShsHeld": 50000000,
+                            "ShsRatio": 0.15,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_major_shareholders(code="86970")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "86970"
+    assert df.iloc[0]["SubDate"] == pd.Timestamp("2025-06-20")
+    assert df.iloc[0]["Hldrs"][0]["HldrName"] == "日本マスタートラスト信託銀行株式会社"
+    assert df.iloc[0]["Hldrs"][0]["Rank"] == 1
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "86970"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_major_shareholders_raises_on_edinet_code_and_code(
+    httpx_mock: HTTPXMock,
+) -> None:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(ValueError, match="edinet_code"):
+            await client.get_edinet_major_shareholders(edinet_code="E03814", code="86970")
+    assert len(httpx_mock.get_requests()) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_major_shareholders_returns_empty_dataframe_with_columns(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_major_shareholders(code="86970")
+    assert df.empty
+    assert list(df.columns) == EDINET_MAJOR_SHAREHOLDERS_COLUMNS_V2
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "86970"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_major_shareholders_range_concatenates_dates(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"DocId": "A", "Code": "86970", "SubDate": "2025-06-19", "Hldrs": []}]},
+    )
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"DocId": "B", "Code": "13260", "SubDate": "2025-06-20", "Hldrs": []}]},
+    )
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_major_shareholders_range(start_dt="2025-06-19", end_dt="2025-06-20")
+    assert len(df) == 2
+    assert list(df["DocId"]) == ["A", "B"]
+    requested_dates = {dict(r.url.params)["date"] for r in httpx_mock.get_requests()}
+    assert requested_dates == {"2025-06-19", "2025-06-20"}
+
+
+# ------------------------------------------------------------------
+# edinet-cross-shareholdings
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_cross_shareholdings_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "DocId": "S100YYYY",
+                    "Code": "86970",
+                    "EdinetCode": "E03814",
+                    "FilerName": "株式会社日本取引所グループ",
+                    "FilerNameEn": "Japan Exchange Group, Inc.",
+                    "DocTypeCode": "120",
+                    "SubDate": "2025-06-20",
+                    "SubTime": "09:00",
+                    "PerSt": "2024-04-01",
+                    "PerEn": "2025-03-31",
+                    "Report": {
+                        "HldrName": "株式会社日本取引所グループ",
+                        "HldrCode": "86970",
+                        "Spec": [
+                            {
+                                "IsrName": "サンプル株式会社",
+                                "IsrCode": "12345",
+                                "CurShs": 1000,
+                                "HoldRat": 0.01,
+                            }
+                        ],
+                        "Deem": [],
+                    },
+                    "Largest": {},
+                    "SecondLargest": {},
+                }
+            ]
+        },
+    )
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_cross_shareholdings(code="86970")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "86970"
+    assert df.iloc[0]["SubDate"] == pd.Timestamp("2025-06-20")
+    assert df.iloc[0]["Report"]["Spec"][0]["IsrName"] == "サンプル株式会社"
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "86970"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_cross_shareholdings_raises_on_edinet_code_and_code(
+    httpx_mock: HTTPXMock,
+) -> None:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(ValueError, match="edinet_code"):
+            await client.get_edinet_cross_shareholdings(edinet_code="E03814", code="86970")
+    assert len(httpx_mock.get_requests()) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_cross_shareholdings_returns_empty_dataframe_with_columns(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_cross_shareholdings(edinet_code="E03814")
+    assert df.empty
+    assert list(df.columns) == EDINET_CROSS_SHAREHOLDINGS_COLUMNS_V2
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"edinet_code": "E03814"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_cross_shareholdings_range_concatenates_dates(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"DocId": "A", "Code": "86970", "SubDate": "2025-06-19"}]},
+    )
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"DocId": "B", "Code": "13260", "SubDate": "2025-06-20"}]},
+    )
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_cross_shareholdings_range(start_dt="2025-06-19", end_dt="2025-06-20")
+    assert len(df) == 2
+    assert list(df["DocId"]) == ["A", "B"]
+    requested_dates = {dict(r.url.params)["date"] for r in httpx_mock.get_requests()}
+    assert requested_dates == {"2025-06-19", "2025-06-20"}
+
+
+# ------------------------------------------------------------------
+# edinet-large-volume-shareholders
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_large_volume_shareholders_returns_dataframe(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "DocId": "S100ZZZZ",
+                    "Code": "12345",
+                    "EdinetCode": "E00001",
+                    "IsrName": "サンプル株式会社",
+                    "DocTypeCode": "350",
+                    "SubDate": "2025-06-20",
+                    "SubTime": "10:00",
+                    "LargeHldgTypeCode": "1",
+                    "DocTitle": "大量保有報告書",
+                    "ChgRsn": "0",
+                    "TotalShsHeld": 1000000,
+                    "TotalShsRatio": 0.05,
+                    "TotalShsRatioLast": 0.04,
+                    "TotalOutStks": 20000000,
+                    "Hldrs": [
+                        {
+                            "HldrName": "サンプル投資顧問株式会社",
+                            "ShsHeld": 1000000,
+                            "ShsRatio": 0.05,
+                            "AcqDisp": [],
+                            "BrwList": [],
+                            "CredList": [],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_large_volume_shareholders(code="12345")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "12345"
+    assert df.iloc[0]["SubDate"] == pd.Timestamp("2025-06-20")
+    assert df.iloc[0]["TotalShsRatio"] == 0.05
+    assert df.iloc[0]["Hldrs"][0]["HldrName"] == "サンプル投資顧問株式会社"
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "12345"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_large_volume_shareholders_raises_on_edinet_code_and_code(
+    httpx_mock: HTTPXMock,
+) -> None:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(ValueError, match="edinet_code"):
+            await client.get_edinet_large_volume_shareholders(edinet_code="E00001", code="12345")
+    assert len(httpx_mock.get_requests()) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_large_volume_shareholders_returns_empty_dataframe_with_columns(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_large_volume_shareholders(code="12345")
+    assert df.empty
+    assert list(df.columns) == EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2
+    assert dict(httpx_mock.get_requests()[0].url.params) == {"code": "12345"}
+
+
+@pytest.mark.asyncio
+async def test_get_edinet_large_volume_shareholders_range_concatenates_dates(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"DocId": "A", "Code": "12345", "SubDate": "2025-06-19"}]},
+    )
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [{"DocId": "B", "Code": "67890", "SubDate": "2025-06-20"}]},
+    )
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_edinet_large_volume_shareholders_range(start_dt="2025-06-19", end_dt="2025-06-20")
+    assert len(df) == 2
+    assert list(df["DocId"]) == ["A", "B"]
+    requested_dates = {dict(r.url.params)["date"] for r in httpx_mock.get_requests()}
+    assert requested_dates == {"2025-06-19", "2025-06-20"}
 
 
 # ------------------------------------------------------------------

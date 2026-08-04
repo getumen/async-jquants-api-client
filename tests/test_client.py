@@ -1020,6 +1020,29 @@ async def test_get_fin_summary_converts_date_columns(httpx_mock: HTTPXMock) -> N
 
 
 @pytest.mark.asyncio
+async def test_get_fin_summary_keeps_shareholders_equity_and_roe(httpx_mock: HTTPXMock) -> None:
+    # 自己資本とROEはレスポンスの末尾に追加されたフィールド。列を固定リストで
+    # 絞っているため、リストに載っていない限り黙って捨てられる。
+    row: dict[str, Any] = {col: "" for col in FIN_SUMMARY_COLUMNS_V2}
+    row["Code"] = "86970"
+    row["DiscDate"] = "2026-05-15"
+    row["Eq"] = "3074785000000"
+    row["ShEq"] = "22335000000"
+    row["NCShEq"] = "13432000000"
+    row["ROE"] = "0.07"
+    row["NCROE"] = "0.05"
+    httpx_mock.add_response(status_code=200, json={"data": [row]})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_fin_summary(date_yyyymmdd="2026-05-15")
+    assert df.iloc[0]["ShEq"] == "22335000000"
+    assert df.iloc[0]["NCShEq"] == "13432000000"
+    assert df.iloc[0]["ROE"] == "0.07"
+    assert df.iloc[0]["NCROE"] == "0.05"
+    # ShEq は Eq (非支配株主持分を含む純資産) とは別の列として残る。
+    assert df.iloc[0]["Eq"] == "3074785000000"
+
+
+@pytest.mark.asyncio
 async def test_get_fin_details_converts_disc_date(httpx_mock: HTTPXMock) -> None:
     row = {
         "DiscDate": "2024-03-15",

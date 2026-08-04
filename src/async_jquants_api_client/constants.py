@@ -1032,6 +1032,13 @@ FIN_SUMMARY_COLUMNS_V2 = [
     "NxFNCOdP",
     "NxFNCNP",
     "NxFNCEPS",
+    # 自己資本とROE。API が末尾に追加したため、ここも末尾に並べればレスポンスの
+    # 順序と一致する。ShEq は Eq (純資産、非支配株主持分を含む) とは別物で、
+    # 親会社株主に帰属する自己資本。ROE はその ShEq を分母とする。
+    "ShEq",
+    "NCShEq",
+    "ROE",
+    "NCROE",
 ]
 
 # ref. ja https://jpx-jquants.com/ja/spec/fin-details

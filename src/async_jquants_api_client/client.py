@@ -620,14 +620,27 @@ class JQuantsClientV2:
         )
         buff: list[pd.DataFrame] = list(cache_dfs)
 
-        results = await asyncio.gather(*[self.get_fin_summary(date_yyyymmdd=d) for d in fetch_dates])
-        for yyyymmdd, df in zip(fetch_dates, results):
+        results = await asyncio.gather(
+            *[self.get_fin_summary(date_yyyymmdd=d) for d in fetch_dates], return_exceptions=True
+        )
+        failures: list[BaseException] = []
+        for yyyymmdd, result in zip(fetch_dates, results):
+            if isinstance(result, BaseException):
+                failures.append(result)
+                continue
+            df = result
             if not df.empty:
                 buff.append(df)
             if cache_dir:
                 cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_summary_{yyyymmdd}.csv.gz"
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 df.to_csv(cache_path, index=False)
+
+        if failures:
+            # Days that succeeded above are already written to cache_dir, so a
+            # caller that retries with the same cache_dir only re-fetches the
+            # dates that actually failed instead of the whole range.
+            raise failures[0]
 
         if not buff:
             return pd.DataFrame()
@@ -699,14 +712,27 @@ class JQuantsClientV2:
         cache_dfs = await asyncio.gather(*[asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
         buff: list[pd.DataFrame] = list(cache_dfs)
 
-        results = await asyncio.gather(*[self.get_fin_details(date_yyyymmdd=d) for d in fetch_dates])
-        for yyyymmdd, df in zip(fetch_dates, results):
+        results = await asyncio.gather(
+            *[self.get_fin_details(date_yyyymmdd=d) for d in fetch_dates], return_exceptions=True
+        )
+        failures: list[BaseException] = []
+        for yyyymmdd, result in zip(fetch_dates, results):
+            if isinstance(result, BaseException):
+                failures.append(result)
+                continue
+            df = result
             if not df.empty:
                 buff.append(df)
             if cache_dir:
                 cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.parquet"
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 df.to_parquet(cache_path, index=False)
+
+        if failures:
+            # Days that succeeded above are already written to cache_dir, so a
+            # caller that retries with the same cache_dir only re-fetches the
+            # dates that actually failed instead of the whole range.
+            raise failures[0]
 
         if not buff:
             return pd.DataFrame()

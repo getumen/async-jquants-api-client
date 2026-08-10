@@ -427,6 +427,40 @@ async def test_get_fin_summary_range_uses_cache(tmp_path: Any) -> None:
     assert df.iloc[0]["Code"] == "5678"
 
 
+@pytest.mark.asyncio
+async def test_get_fin_summary_range_caches_successful_days_despite_one_failure(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """1日でも取得に失敗したら例外を送出するが、成功済みの日は例外の前にキャッシュへ
+    書き込まれ、失われないことを確認する（呼び出し側が同じ cache_dir で再試行した際に
+    失敗した日だけ再取得できるようにするための挙動）"""
+    ok_row_1: dict[str, Any] = {col: None for col in FIN_SUMMARY_COLUMNS_V2}
+    ok_row_1["Code"] = "1111"
+    ok_row_1["DiscDate"] = "2024-01-03"
+    ok_row_2: dict[str, Any] = {col: None for col in FIN_SUMMARY_COLUMNS_V2}
+    ok_row_2["Code"] = "2222"
+    ok_row_2["DiscDate"] = "2024-01-05"
+
+    fins_summary_url = "https://api.jquants.com/v2/fins/summary"
+    httpx_mock.add_response(
+        status_code=200, json={"data": [ok_row_1]}, url=fins_summary_url, match_params={"date": "20240103"}
+    )
+    for _ in range(3):  # tenacity retries 429 up to 3 attempts before giving up
+        httpx_mock.add_response(status_code=429, url=fins_summary_url, match_params={"date": "20240104"})
+    httpx_mock.add_response(
+        status_code=200, json={"data": [ok_row_2]}, url=fins_summary_url, match_params={"date": "20240105"}
+    )
+
+    cache_dir = str(tmp_path)
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(JQuantsAPIError):
+            await client.get_fin_summary_range("20240103", "20240105", cache_dir=cache_dir)
+
+    assert os.path.isfile(f"{cache_dir}/2024/v2_fin_summary_20240103.csv.gz")
+    assert os.path.isfile(f"{cache_dir}/2024/v2_fin_summary_20240105.csv.gz")
+    assert not os.path.isfile(f"{cache_dir}/2024/v2_fin_summary_20240104.csv.gz")
+
+
 # ------------------------------------------------------------------
 # fins-details
 # ------------------------------------------------------------------
@@ -470,6 +504,50 @@ async def test_get_fin_details_range_uses_cache(tmp_path: Any) -> None:
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 1
     assert df.iloc[0]["Code"] == "5678"
+
+
+@pytest.mark.asyncio
+async def test_get_fin_details_range_caches_successful_days_despite_one_failure(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """1日でも取得に失敗したら例外を送出するが、成功済みの日は例外の前にキャッシュへ
+    書き込まれ、失われないことを確認する（呼び出し側が同じ cache_dir で再試行した際に
+    失敗した日だけ再取得できるようにするための挙動）"""
+    ok_row_1 = {
+        "DiscDate": "2024-01-03",
+        "DiscTime": "12:00:00",
+        "Code": "1111",
+        "DiscNo": "1",
+        "DocType": "X",
+        "FS": {"NetSales": "1000000"},
+    }
+    ok_row_2 = {
+        "DiscDate": "2024-01-05",
+        "DiscTime": "12:00:00",
+        "Code": "2222",
+        "DiscNo": "1",
+        "DocType": "X",
+        "FS": {"NetSales": "2000000"},
+    }
+
+    fins_details_url = "https://api.jquants.com/v2/fins/details"
+    httpx_mock.add_response(
+        status_code=200, json={"data": [ok_row_1]}, url=fins_details_url, match_params={"date": "20240103"}
+    )
+    for _ in range(3):  # tenacity retries 429 up to 3 attempts before giving up
+        httpx_mock.add_response(status_code=429, url=fins_details_url, match_params={"date": "20240104"})
+    httpx_mock.add_response(
+        status_code=200, json={"data": [ok_row_2]}, url=fins_details_url, match_params={"date": "20240105"}
+    )
+
+    cache_dir = str(tmp_path)
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(JQuantsAPIError):
+            await client.get_fin_details_range("20240103", "20240105", cache_dir=cache_dir)
+
+    assert os.path.isfile(f"{cache_dir}/2024/v2_fin_details_20240103.parquet")
+    assert os.path.isfile(f"{cache_dir}/2024/v2_fin_details_20240105.parquet")
+    assert not os.path.isfile(f"{cache_dir}/2024/v2_fin_details_20240104.parquet")
 
 
 # ------------------------------------------------------------------

@@ -13,6 +13,7 @@ from async_jquants_api_client.constants import (
     EDINET_CROSS_SHAREHOLDINGS_COLUMNS_V2,
     EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2,
     EDINET_MAJOR_SHAREHOLDERS_COLUMNS_V2,
+    EQ_BARS_DAILY_COLUMNS_V2,
     FIN_SUMMARY_COLUMNS_V2,
     FINS_DIVIDEND_COLUMNS_V2,
 )
@@ -299,20 +300,61 @@ async def test_get_eq_bars_daily_returns_dataframe(httpx_mock: HTTPXMock) -> Non
                     "AdjL": 2035.0,
                     "AdjC": 2045.0,
                     "AdjVo": 2202500.0,
-                }
+                    "MktCap": 2242585.0,
+                    "ExRT": None,
+                },
+                {
+                    "Date": "2023-03-24",
+                    "Code": "13010",
+                    "O": 100.0,
+                    "H": 110.0,
+                    "L": 95.0,
+                    "C": 105.0,
+                    "UL": "0",
+                    "LL": "0",
+                    "Vo": 500000.0,
+                    "Va": 52500000.0,
+                    "AdjFactor": 1.0,
+                    "AdjO": 100.0,
+                    "AdjH": 110.0,
+                    "AdjL": 95.0,
+                    "AdjC": 105.0,
+                    "AdjVo": 500000.0,
+                    "MktCap": 30250.0,
+                    "ExRT": "1",
+                },
             ]
         },
     )
     async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
         df = await client.get_eq_bars_daily(code="86970", date_yyyymmdd="2023-03-24")
     assert isinstance(df, pd.DataFrame)
-    assert len(df) == 1
-    assert df.iloc[0]["Code"] == "86970"
-    assert df.iloc[0]["O"] == 2047.0
-    assert df.iloc[0]["H"] == 2069.0
-    assert df.iloc[0]["L"] == 2035.0
-    assert df.iloc[0]["C"] == 2045.0
-    assert df.iloc[0]["Date"] == pd.Timestamp("2023-03-24")
+    assert len(df) == 2
+    row_86970 = df[df["Code"] == "86970"].iloc[0]
+    assert row_86970["O"] == 2047.0
+    assert row_86970["H"] == 2069.0
+    assert row_86970["L"] == 2035.0
+    assert row_86970["C"] == 2045.0
+    assert row_86970["Date"] == pd.Timestamp("2023-03-24")
+    assert row_86970["MktCap"] == 2242585.0
+    assert pd.isna(row_86970["ExRT"])
+    row_13010 = df[df["Code"] == "13010"].iloc[0]
+    assert row_13010["MktCap"] == 30250.0
+    assert row_13010["ExRT"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_bars_daily_empty_response_has_mktcap_exrt_columns(httpx_mock: HTTPXMock) -> None:
+    """空レスポンス時のフォールバック DataFrame が MktCap/ExRT 列を含むことを確認する
+    (EQ_BARS_DAILY_COLUMNS_V2 のリグレッション検知用)"""
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_bars_daily(code="86970", date_yyyymmdd="2023-03-24")
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+    assert list(df.columns) == EQ_BARS_DAILY_COLUMNS_V2
+    assert "MktCap" in df.columns
+    assert "ExRT" in df.columns
 
 
 @pytest.mark.asyncio

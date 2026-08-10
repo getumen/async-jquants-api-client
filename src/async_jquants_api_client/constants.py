@@ -759,6 +759,8 @@ EQ_BARS_DAILY_COLUMNS_V2 = [
     "AAdjL",
     "AAdjC",
     "AAdjVo",
+    "MktCap",
+    "ExRT",
 ]
 
 # ref. ja https://jpx-jquants.com/ja/spec/eq-bars-minute

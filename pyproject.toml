@@ -1,6 +1,6 @@
 [project]
 name = "async-jquants-api-client"
-version = "0.3.0"
+version = "0.4.0"
 description = "Async Python client for JQuants API"
 readme = "README.md"
 license = "Apache-2.0"

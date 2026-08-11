@@ -63,8 +63,13 @@ def _write_cache_atomic(path: str, write_to: Callable[[str], None]) -> None:
         write_to(tmp_path)
         os.replace(tmp_path, path)
     except BaseException:
-        if os.path.exists(tmp_path):
+        try:
             os.remove(tmp_path)
+        except OSError:
+            # 一時ファイル削除の失敗(権限エラー等)で元の書き込みエラーを隠さない。
+            # OSError で FileNotFoundError も吸収できるため事前の exists チェックは不要で、
+            # チェックと削除の間にファイルが消える TOCTOU も避けられる。
+            pass
         raise
 
 

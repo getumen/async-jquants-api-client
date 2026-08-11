@@ -475,6 +475,30 @@ def test_write_cache_atomic_keeps_existing_file_when_write_fails(tmp_path: Any) 
     assert list(tmp_path.iterdir()) == [Path(path)]
 
 
+def test_write_cache_atomic_reraises_original_error_when_tmp_cleanup_also_fails(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = str(tmp_path / "cache.csv.gz")
+    Path(path).write_text("original")
+
+    def failing_writer(p: str) -> None:
+        Path(p).write_text("partial-garbage")
+        raise RuntimeError("disk full")
+
+    def failing_remove(p: str) -> None:
+        raise PermissionError("cannot remove tmp file")
+
+    monkeypatch.setattr(os, "remove", failing_remove)
+
+    # 一時ファイルの削除自体が失敗しても、呼び出し元には元の書き込みエラー(RuntimeError)が
+    # そのまま伝播すること。削除失敗(PermissionError)で本来の原因がマスクされてはいけない。
+    with pytest.raises(RuntimeError, match="disk full"):
+        _write_cache_atomic(path, failing_writer)
+
+    # 既存キャッシュは壊れずに残る
+    assert Path(path).read_text() == "original"
+
+
 def test_write_cache_atomic_creates_parent_directory(tmp_path: Any) -> None:
     path = str(tmp_path / "2024" / "cache.csv.gz")
 

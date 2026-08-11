@@ -1,14 +1,16 @@
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pandas as pd
 import pytest
 from pytest_httpx import HTTPXMock
 
 from async_jquants_api_client import JQuantsAPIError, JQuantsAuthError, JQuantsClientV2, Plan
-from async_jquants_api_client.client import _aggregate_bars_n_minute
+from async_jquants_api_client.client import _aggregate_bars_n_minute, _write_cache_atomic
 from async_jquants_api_client.constants import (
     EDINET_CROSS_SHAREHOLDINGS_COLUMNS_V2,
     EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2,
@@ -434,6 +436,79 @@ async def test_get_eq_bars_daily_range_requests_all_dates(httpx_mock: HTTPXMock)
 
 
 # ------------------------------------------------------------------
+# _write_cache_atomic (fins-summary / fins-details の逐次書き込みで使う共通ヘルパー)
+# ------------------------------------------------------------------
+
+
+def _write_text(path: str, content: str) -> None:
+    Path(path).write_text(content)
+
+
+def test_write_cache_atomic_replaces_file_and_leaves_no_tmp_file(tmp_path: Any) -> None:
+    path = str(tmp_path / "cache.csv.gz")
+
+    _write_cache_atomic(path, lambda p: _write_text(p, "v1"))
+    assert Path(path).read_text() == "v1"
+
+    # 2回目の書き込みで既存キャッシュをアトミックに置き換える
+    _write_cache_atomic(path, lambda p: _write_text(p, "v2"))
+    assert Path(path).read_text() == "v2"
+
+    # ディレクトリ内に一時ファイルが残っていないこと(最終的なキャッシュファイルのみ存在)
+    assert list(tmp_path.iterdir()) == [Path(path)]
+
+
+def test_write_cache_atomic_keeps_existing_file_when_write_fails(tmp_path: Any) -> None:
+    path = str(tmp_path / "cache.csv.gz")
+    Path(path).write_text("original")
+
+    def failing_writer(p: str) -> None:
+        Path(p).write_text("partial-garbage")
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        _write_cache_atomic(path, failing_writer)
+
+    # 書き込みに失敗しても既存キャッシュは壊れずに残る
+    assert Path(path).read_text() == "original"
+    # 失敗した一時ファイルはクリーンアップされ、残らない
+    assert list(tmp_path.iterdir()) == [Path(path)]
+
+
+def test_write_cache_atomic_reraises_original_error_when_tmp_cleanup_also_fails(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = str(tmp_path / "cache.csv.gz")
+    Path(path).write_text("original")
+
+    def failing_writer(p: str) -> None:
+        Path(p).write_text("partial-garbage")
+        raise RuntimeError("disk full")
+
+    def failing_remove(p: str) -> None:
+        raise PermissionError("cannot remove tmp file")
+
+    monkeypatch.setattr(os, "remove", failing_remove)
+
+    # 一時ファイルの削除自体が失敗しても、呼び出し元には元の書き込みエラー(RuntimeError)が
+    # そのまま伝播すること。削除失敗(PermissionError)で本来の原因がマスクされてはいけない。
+    with pytest.raises(RuntimeError, match="disk full"):
+        _write_cache_atomic(path, failing_writer)
+
+    # 既存キャッシュは壊れずに残る
+    assert Path(path).read_text() == "original"
+
+
+def test_write_cache_atomic_creates_parent_directory(tmp_path: Any) -> None:
+    path = str(tmp_path / "2024" / "cache.csv.gz")
+
+    _write_cache_atomic(path, lambda p: _write_text(p, "v1"))
+
+    assert Path(path).read_text() == "v1"
+    assert list((tmp_path / "2024").iterdir()) == [Path(path)]
+
+
+# ------------------------------------------------------------------
 # fins-summary
 # ------------------------------------------------------------------
 
@@ -501,6 +576,50 @@ async def test_get_fin_summary_range_caches_successful_days_despite_one_failure(
     assert os.path.isfile(f"{cache_dir}/2024/v2_fin_summary_20240103.csv.gz")
     assert os.path.isfile(f"{cache_dir}/2024/v2_fin_summary_20240105.csv.gz")
     assert not os.path.isfile(f"{cache_dir}/2024/v2_fin_summary_20240104.csv.gz")
+
+
+@pytest.mark.asyncio
+async def test_get_fin_summary_range_writes_cache_before_next_date_fetch_starts(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """逐次書き込みの検証: 1日目の取得成功と2日目の取得開始の間で、gather 全体の完了を
+    待たずに1日目のキャッシュが書き込まれていることを確認する。
+
+    /fins/summary はレート制限が60リクエスト/分(1秒に1回)のため、1日目・2日目の
+    リクエストは実際に約1秒間隔で送出される。2日目のリクエストが実際に送出された
+    時点(=このコールバックが呼ばれた時点)で1日目のキャッシュファイルが存在していれば、
+    「全日程の取得が終わってからまとめて書く」旧実装ではあり得ない挙動、すなわち
+    日付ごとの逐次書き込みが行われていることの証拠になる。
+    """
+    row1: dict[str, Any] = {col: None for col in FIN_SUMMARY_COLUMNS_V2}
+    row1["Code"] = "1111"
+    row1["DiscDate"] = "2024-01-03"
+    row2: dict[str, Any] = {col: None for col in FIN_SUMMARY_COLUMNS_V2}
+    row2["Code"] = "2222"
+    row2["DiscDate"] = "2024-01-04"
+
+    cache_dir = str(tmp_path)
+    day1_cache_path = f"{cache_dir}/2024/v2_fin_summary_20240103.csv.gz"
+    cache_exists_when_day2_request_starts: bool | None = None
+
+    def day1_callback(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=200, json={"data": [row1]})
+
+    def day2_callback(request: httpx.Request) -> httpx.Response:
+        nonlocal cache_exists_when_day2_request_starts
+        cache_exists_when_day2_request_starts = os.path.isfile(day1_cache_path)
+        return httpx.Response(status_code=200, json={"data": [row2]})
+
+    fins_summary_url = "https://api.jquants.com/v2/fins/summary"
+    httpx_mock.add_callback(day1_callback, url=fins_summary_url, match_params={"date": "20240103"})
+    httpx_mock.add_callback(day2_callback, url=fins_summary_url, match_params={"date": "20240104"})
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_fin_summary_range("20240103", "20240104", cache_dir=cache_dir)
+
+    assert len(df) == 2
+    assert cache_exists_when_day2_request_starts is True
+    assert os.path.isfile(f"{cache_dir}/2024/v2_fin_summary_20240104.csv.gz")
 
 
 # ------------------------------------------------------------------
@@ -590,6 +709,60 @@ async def test_get_fin_details_range_caches_successful_days_despite_one_failure(
     assert os.path.isfile(f"{cache_dir}/2024/v2_fin_details_20240103.parquet")
     assert os.path.isfile(f"{cache_dir}/2024/v2_fin_details_20240105.parquet")
     assert not os.path.isfile(f"{cache_dir}/2024/v2_fin_details_20240104.parquet")
+
+
+@pytest.mark.asyncio
+async def test_get_fin_details_range_writes_cache_before_next_date_fetch_starts(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """逐次書き込みの検証: 1日目の取得成功と2日目の取得開始の間で、gather 全体の完了を
+    待たずに1日目のキャッシュが書き込まれていることを確認する。
+
+    /fins/details もレート制限が60リクエスト/分(1秒に1回)のため、1日目・2日目の
+    リクエストは実際に約1秒間隔で送出される。2日目のリクエストが実際に送出された
+    時点(=このコールバックが呼ばれた時点)で1日目のキャッシュファイルが存在していれば、
+    「全日程の取得が終わってからまとめて書く」旧実装ではあり得ない挙動、すなわち
+    日付ごとの逐次書き込みが行われていることの証拠になる。
+    """
+    row1 = {
+        "DiscDate": "2024-01-03",
+        "DiscTime": "12:00:00",
+        "Code": "1111",
+        "DiscNo": "1",
+        "DocType": "X",
+        "FS": {"NetSales": "1000000"},
+    }
+    row2 = {
+        "DiscDate": "2024-01-04",
+        "DiscTime": "12:00:00",
+        "Code": "2222",
+        "DiscNo": "1",
+        "DocType": "X",
+        "FS": {"NetSales": "2000000"},
+    }
+
+    cache_dir = str(tmp_path)
+    day1_cache_path = f"{cache_dir}/2024/v2_fin_details_20240103.parquet"
+    cache_exists_when_day2_request_starts: bool | None = None
+
+    def day1_callback(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=200, json={"data": [row1]})
+
+    def day2_callback(request: httpx.Request) -> httpx.Response:
+        nonlocal cache_exists_when_day2_request_starts
+        cache_exists_when_day2_request_starts = os.path.isfile(day1_cache_path)
+        return httpx.Response(status_code=200, json={"data": [row2]})
+
+    fins_details_url = "https://api.jquants.com/v2/fins/details"
+    httpx_mock.add_callback(day1_callback, url=fins_details_url, match_params={"date": "20240103"})
+    httpx_mock.add_callback(day2_callback, url=fins_details_url, match_params={"date": "20240104"})
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_fin_details_range("20240103", "20240104", cache_dir=cache_dir)
+
+    assert len(df) == 2
+    assert cache_exists_when_day2_request_starts is True
+    assert os.path.isfile(f"{cache_dir}/2024/v2_fin_details_20240104.parquet")
 
 
 # ------------------------------------------------------------------

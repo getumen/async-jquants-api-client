@@ -1,7 +1,8 @@
 import asyncio
 import os
 import sys
-from collections.abc import AsyncGenerator
+import uuid
+from collections.abc import AsyncGenerator, Callable
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -45,6 +46,31 @@ def _read_fin_summary_cache(path: str, date_cols: list[str]) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
     return df
+
+
+def _write_cache_atomic(path: str, write_to: Callable[[str], None]) -> None:
+    """キャッシュファイルを一時ファイルへ書き込んでから `os.replace` でアトミックに配置する。
+
+    書き込み途中でプロセスが落ちても、最終的なキャッシュファイルは「以前のまま」か
+    「新しい内容に完全に置き換わった」状態のいずれかになり、書きかけの壊れたファイルが
+    残らない。同期 I/O のため、呼び出し側は `asyncio.to_thread` 経由で呼ぶこと。
+    """
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.tmp-{uuid.uuid4().hex}"
+    try:
+        write_to(tmp_path)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            # 一時ファイル削除の失敗(権限エラー等)で元の書き込みエラーを隠さない。
+            # OSError で FileNotFoundError も吸収できるため事前の exists チェックは不要で、
+            # チェックと削除の間にファイルが消える TOCTOU も避けられる。
+            pass
+        raise
 
 
 def _aggregate_bars_n_minute(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
@@ -620,26 +646,28 @@ class JQuantsClientV2:
         )
         buff: list[pd.DataFrame] = list(cache_dfs)
 
-        results = await asyncio.gather(
-            *[self.get_fin_summary(date_yyyymmdd=d) for d in fetch_dates], return_exceptions=True
-        )
+        async def _fetch_and_cache(yyyymmdd: str) -> pd.DataFrame:
+            df = await self.get_fin_summary(date_yyyymmdd=yyyymmdd)
+            if cache_dir:
+                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_summary_{yyyymmdd}.csv.gz"
+                await asyncio.to_thread(
+                    _write_cache_atomic, cache_path, lambda p: df.to_csv(p, index=False, compression="gzip")
+                )
+            return df
+
+        results = await asyncio.gather(*[_fetch_and_cache(d) for d in fetch_dates], return_exceptions=True)
         failures: list[BaseException] = []
-        for yyyymmdd, result in zip(fetch_dates, results):
+        for result in results:
             if isinstance(result, BaseException):
                 failures.append(result)
                 continue
-            df = result
-            if not df.empty:
-                buff.append(df)
-            if cache_dir:
-                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_summary_{yyyymmdd}.csv.gz"
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                df.to_csv(cache_path, index=False)
+            if not result.empty:
+                buff.append(result)
 
         if failures:
-            # Days that succeeded above are already written to cache_dir, so a
-            # caller that retries with the same cache_dir only re-fetches the
-            # dates that actually failed instead of the whole range.
+            # 各日のキャッシュは、その日の取得が成功した直後(gather 完了前)に既に
+            # 書き込まれているので、呼び出し側が同じ cache_dir で再試行した際は
+            # 失敗した日だけ再取得できる。
             raise failures[0]
 
         if not buff:
@@ -712,26 +740,26 @@ class JQuantsClientV2:
         cache_dfs = await asyncio.gather(*[asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
         buff: list[pd.DataFrame] = list(cache_dfs)
 
-        results = await asyncio.gather(
-            *[self.get_fin_details(date_yyyymmdd=d) for d in fetch_dates], return_exceptions=True
-        )
+        async def _fetch_and_cache(yyyymmdd: str) -> pd.DataFrame:
+            df = await self.get_fin_details(date_yyyymmdd=yyyymmdd)
+            if cache_dir:
+                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.parquet"
+                await asyncio.to_thread(_write_cache_atomic, cache_path, lambda p: df.to_parquet(p, index=False))
+            return df
+
+        results = await asyncio.gather(*[_fetch_and_cache(d) for d in fetch_dates], return_exceptions=True)
         failures: list[BaseException] = []
-        for yyyymmdd, result in zip(fetch_dates, results):
+        for result in results:
             if isinstance(result, BaseException):
                 failures.append(result)
                 continue
-            df = result
-            if not df.empty:
-                buff.append(df)
-            if cache_dir:
-                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.parquet"
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                df.to_parquet(cache_path, index=False)
+            if not result.empty:
+                buff.append(result)
 
         if failures:
-            # Days that succeeded above are already written to cache_dir, so a
-            # caller that retries with the same cache_dir only re-fetches the
-            # dates that actually failed instead of the whole range.
+            # 各日のキャッシュは、その日の取得が成功した直後(gather 完了前)に既に
+            # 書き込まれているので、呼び出し側が同じ cache_dir で再試行した際は
+            # 失敗した日だけ再取得できる。
             raise failures[0]
 
         if not buff:

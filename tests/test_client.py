@@ -483,6 +483,9 @@ async def test_get_eq_valuation_raises_on_invalid_params() -> None:
             await client.get_eq_valuation(to_yyyymmdd="20220131")
         with pytest.raises(ValueError):
             await client.get_eq_valuation(from_yyyymmdd="20220101", to_yyyymmdd="20220131")
+        with pytest.raises(ValueError):
+            # date_yyyymmdd 指定があっても、from/to は code 併用が必須
+            await client.get_eq_valuation(date_yyyymmdd="20220115", from_yyyymmdd="20220101")
 
 
 @pytest.mark.asyncio

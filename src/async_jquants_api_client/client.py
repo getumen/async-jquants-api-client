@@ -375,6 +375,82 @@ class JQuantsClientV2:
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
+    # eq-valuation (/equities/valuation)
+    # ------------------------------------------------------------------
+    async def get_eq_valuation(
+        self,
+        code: str = "",
+        from_yyyymmdd: str = "",
+        to_yyyymmdd: str = "",
+        date_yyyymmdd: str = "",
+    ) -> pd.DataFrame:
+        """
+        eq-valuation: 株式バリュエーション指標 (v2: /equities/valuation)
+
+        Args:
+            code: 銘柄コード (5桁 or 4桁)
+            from_yyyymmdd: 期間開始日 (YYYYMMDD or YYYY-MM-DD)
+            to_yyyymmdd: 期間終了日 (YYYYMMDD or YYYY-MM-DD)
+            date_yyyymmdd: 特定日付 (YYYYMMDD or YYYY-MM-DD)
+        Returns:
+            pd.DataFrame: バリュエーション指標データ (v2のフィールド名で返却)
+        """
+        params: dict[str, Any] = {}
+        if code:
+            params["code"] = code
+        if date_yyyymmdd:
+            params["date"] = date_yyyymmdd
+        else:
+            if from_yyyymmdd:
+                params["from"] = from_yyyymmdd
+            if to_yyyymmdd:
+                params["to"] = to_yyyymmdd
+
+        all_data = [
+            item
+            async for item in self._paginate(
+                "/equities/valuation",
+                params=params,
+            )
+        ]
+
+        if not all_data:
+            return pd.DataFrame(columns=constants.EQ_VALUATION_COLUMNS_V2)
+
+        df = pd.DataFrame.from_records(all_data)
+        if "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+        sort_cols = [c for c in ["Code", "Date"] if c in df.columns]
+        if sort_cols:
+            df.sort_values(sort_cols, inplace=True)
+
+        cols = constants.EQ_VALUATION_COLUMNS_V2
+        return df[cols].reset_index(drop=True)
+
+    async def get_eq_valuation_range(
+        self,
+        start_dt: DatetimeLike = "20170101",
+        end_dt: DatetimeLike | None = None,
+    ) -> pd.DataFrame:
+        """
+        全銘柄の株式バリュエーション指標を日付範囲指定して取得 (v2: /equities/valuation)
+
+        Args:
+            start_dt: 取得開始日 (YYYYMMDD or YYYY-MM-DD)
+            end_dt: 取得終了日 (YYYYMMDD or YYYY-MM-DD)
+        Returns:
+            pd.DataFrame: バリュエーション指標データ (Code, Date 列でソート)
+        """
+        dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
+        buff: list[pd.DataFrame] = []
+        results = await asyncio.gather(*[self.get_eq_valuation(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        buff.extend(df for df in results if not df.empty)
+        if not buff:
+            return pd.DataFrame()
+        return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
     # eq-bars-daily-am (/equities/bars/daily/am)
     # ------------------------------------------------------------------
     async def get_eq_bars_daily_am(self, code: str = "") -> pd.DataFrame:

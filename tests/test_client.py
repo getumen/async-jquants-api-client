@@ -16,6 +16,7 @@ from async_jquants_api_client.constants import (
     EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2,
     EDINET_MAJOR_SHAREHOLDERS_COLUMNS_V2,
     EQ_BARS_DAILY_COLUMNS_V2,
+    EQ_VALUATION_COLUMNS_V2,
     FIN_SUMMARY_COLUMNS_V2,
     FINS_DIVIDEND_COLUMNS_V2,
 )
@@ -433,6 +434,97 @@ async def test_get_eq_bars_daily_range_requests_all_dates(httpx_mock: HTTPXMock)
     assert len(df) == len(dates)
     requested_dates = [dict(r.url.params)["date"] for r in httpx_mock.get_requests()]
     assert requested_dates == [d.strftime("%Y-%m-%d") for d in dates]
+
+
+# ------------------------------------------------------------------
+# get_eq_valuation
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2023-03-24",
+                    "Code": "86970",
+                    "EPS": 120.5,
+                    "FwdEPS": 130.0,
+                    "BPS": 850.2,
+                    "ROE": 0.145,
+                    "FwdROE": 0.153,
+                    "PER": 17.5,
+                    "FwdPER": 16.2,
+                    "PBR": 2.5,
+                    "MktCap": 2242585.0,
+                },
+                {
+                    "Date": "2023-03-24",
+                    "Code": "13010",
+                    "EPS": None,
+                    "FwdEPS": None,
+                    "BPS": None,
+                    "ROE": None,
+                    "FwdROE": None,
+                    "PER": None,
+                    "FwdPER": None,
+                    "PBR": None,
+                    "MktCap": 30250.0,
+                },
+            ]
+        },
+    )
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation(code="86970", date_yyyymmdd="2023-03-24")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 2
+    row_86970 = df[df["Code"] == "86970"].iloc[0]
+    assert row_86970["EPS"] == 120.5
+    assert row_86970["PER"] == 17.5
+    assert row_86970["PBR"] == 2.5
+    assert row_86970["Date"] == pd.Timestamp("2023-03-24")
+    row_13010 = df[df["Code"] == "13010"].iloc[0]
+    assert pd.isna(row_13010["EPS"])
+    assert row_13010["MktCap"] == 30250.0
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_empty_response_has_expected_columns(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation(code="86970", date_yyyymmdd="2023-03-24")
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+    assert list(df.columns) == EQ_VALUATION_COLUMNS_V2
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_follows_pagination(httpx_mock: HTTPXMock) -> None:
+    row_86970 = {
+        "Date": "2023-03-24",
+        "Code": "86970",
+        "EPS": 120.5,
+        "FwdEPS": 130.0,
+        "BPS": 850.2,
+        "ROE": 0.145,
+        "FwdROE": 0.153,
+        "PER": 17.5,
+        "FwdPER": 16.2,
+        "PBR": 2.5,
+        "MktCap": 2242585.0,
+    }
+    row_13010 = {**row_86970, "Code": "13010"}
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [row_86970], "pagination_key": "value1.value2."},
+    )
+    httpx_mock.add_response(status_code=200, json={"data": [row_13010]})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation(date_yyyymmdd="2023-03-24")
+    assert len(df) == 2
+    assert list(df["Code"]) == ["13010", "86970"]
 
 
 # ------------------------------------------------------------------

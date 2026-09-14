@@ -387,6 +387,13 @@ class JQuantsClientV2:
         """
         eq-valuation: 株式バリュエーション指標 (v2: /equities/valuation)
 
+        code または date_yyyymmdd のいずれかの指定が必須です (API 仕様)。
+        from_yyyymmdd / to_yyyymmdd で期間を指定する場合は code の指定も必須です。
+        サーバ側は from と to の両方が指定された場合のみ code を必須とするが、
+        仕様書のパラメータ組み合わせに code なしの期間指定が存在せず、
+        code なしで片側だけ指定すると黙って無視されるため、ここでは片側のみの
+        指定でも code を必須として弾く。
+
         Args:
             code: 銘柄コード (5桁 or 4桁)
             from_yyyymmdd: 期間開始日 (YYYYMMDD or YYYY-MM-DD)
@@ -395,6 +402,11 @@ class JQuantsClientV2:
         Returns:
             pd.DataFrame: バリュエーション指標データ (v2のフィールド名で返却)
         """
+        if not code and not date_yyyymmdd:
+            raise ValueError("code または date_yyyymmdd のいずれかを指定してください。")
+        if (from_yyyymmdd or to_yyyymmdd) and not code:
+            raise ValueError("from_yyyymmdd / to_yyyymmdd を指定する場合は code も指定してください。")
+
         params: dict[str, Any] = {}
         if code:
             params["code"] = code
@@ -441,13 +453,15 @@ class JQuantsClientV2:
             end_dt: 取得終了日 (YYYYMMDD or YYYY-MM-DD)
         Returns:
             pd.DataFrame: バリュエーション指標データ (Code, Date 列でソート)
+                該当データがない場合も列定義を保持した空の DataFrame を返します。
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
         results = await asyncio.gather(*[self.get_eq_valuation(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
         buff.extend(df for df in results if not df.empty)
         if not buff:
-            return pd.DataFrame()
+            # 単発取得 (get_eq_valuation) の空結果と返却契約を揃える
+            return pd.DataFrame(columns=constants.EQ_VALUATION_COLUMNS_V2)
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------

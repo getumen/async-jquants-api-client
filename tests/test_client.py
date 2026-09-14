@@ -444,7 +444,6 @@ async def test_get_eq_bars_daily_range_requests_all_dates(httpx_mock: HTTPXMock)
 @pytest.mark.asyncio
 async def test_get_eq_valuation_params(httpx_mock: HTTPXMock) -> None:
     cases = [
-        ({}, {}),
         ({"code": "86970"}, {"code": "86970"}),
         (
             {"code": "86970", "from_yyyymmdd": "20220101"},
@@ -471,6 +470,19 @@ async def test_get_eq_valuation_params(httpx_mock: HTTPXMock) -> None:
         request = httpx_mock.get_requests()[-1]
         actual = dict(request.url.params)
         assert actual == expected_params, f"kwargs={kwargs}: expected {expected_params}, got {actual}"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_raises_on_invalid_params() -> None:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(ValueError):
+            await client.get_eq_valuation()
+        with pytest.raises(ValueError):
+            await client.get_eq_valuation(from_yyyymmdd="20220101")
+        with pytest.raises(ValueError):
+            await client.get_eq_valuation(to_yyyymmdd="20220131")
+        with pytest.raises(ValueError):
+            await client.get_eq_valuation(from_yyyymmdd="20220101", to_yyyymmdd="20220131")
 
 
 @pytest.mark.asyncio
@@ -596,6 +608,19 @@ async def test_get_eq_valuation_range_accepts_various_date_formats(
         requests = httpx_mock.get_requests()[-5:]
         actual_dates = {dict(r.url.params).get("date") for r in requests}
         assert actual_dates == expected_dates, f"format {type(start)}: expected {expected_dates}, got {actual_dates}"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_empty_has_expected_columns(httpx_mock: HTTPXMock) -> None:
+    """全日程が空レスポンスの場合でも EQ_VALUATION_COLUMNS_V2 の列を保持することを確認する
+    (get_eq_valuation 単体の空結果との契約を揃えるリグレッション検知用)"""
+    for _ in range(2):
+        httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation_range("20240105", "20240106")
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+    assert list(df.columns) == EQ_VALUATION_COLUMNS_V2
 
 
 # ------------------------------------------------------------------

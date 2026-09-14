@@ -442,6 +442,38 @@ async def test_get_eq_bars_daily_range_requests_all_dates(httpx_mock: HTTPXMock)
 
 
 @pytest.mark.asyncio
+async def test_get_eq_valuation_params(httpx_mock: HTTPXMock) -> None:
+    cases = [
+        ({}, {}),
+        ({"code": "86970"}, {"code": "86970"}),
+        (
+            {"code": "86970", "from_yyyymmdd": "20220101"},
+            {"code": "86970", "from": "20220101"},
+        ),
+        (
+            {"code": "86970", "to_yyyymmdd": "20220131"},
+            {"code": "86970", "to": "20220131"},
+        ),
+        (
+            {"code": "86970", "from_yyyymmdd": "20220101", "to_yyyymmdd": "20220131"},
+            {"code": "86970", "from": "20220101", "to": "20220131"},
+        ),
+        ({"date_yyyymmdd": "20220115"}, {"date": "20220115"}),
+        (
+            {"code": "86970", "date_yyyymmdd": "20220115"},
+            {"code": "86970", "date": "20220115"},
+        ),
+    ]
+    for kwargs, expected_params in cases:
+        httpx_mock.add_response(status_code=200, json={"data": []})
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+            await client.get_eq_valuation(**kwargs)
+        request = httpx_mock.get_requests()[-1]
+        actual = dict(request.url.params)
+        assert actual == expected_params, f"kwargs={kwargs}: expected {expected_params}, got {actual}"
+
+
+@pytest.mark.asyncio
 async def test_get_eq_valuation_returns_dataframe(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         status_code=200,
@@ -525,6 +557,45 @@ async def test_get_eq_valuation_follows_pagination(httpx_mock: HTTPXMock) -> Non
         df = await client.get_eq_valuation(date_yyyymmdd="2023-03-24")
     assert len(df) == 2
     assert list(df["Code"]) == ["13010", "86970"]
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_accepts_various_date_formats(
+    httpx_mock: HTTPXMock,
+) -> None:
+    import pandas as pd
+    from dateutil import tz
+
+    from async_jquants_api_client.client import DatetimeLike
+
+    jst = tz.gettz("Asia/Tokyo")
+    date_formats: list[tuple[DatetimeLike, DatetimeLike]] = [
+        ("20200227", "20200302"),  # 8桁文字列
+        ("2020-02-27", "2020-03-02"),  # ハイフン区切り文字列
+        (datetime(2020, 2, 27), datetime(2020, 3, 2)),  # datetime
+        (
+            datetime(2020, 2, 27, tzinfo=jst),
+            datetime(2020, 3, 2, tzinfo=jst),
+        ),  # datetime with tz
+        (pd.Timestamp("2020-02-27"), pd.Timestamp("2020-03-02")),  # pd.Timestamp
+    ]
+    expected_dates = {
+        "2020-02-27",
+        "2020-02-28",
+        "2020-02-29",
+        "2020-03-01",
+        "2020-03-02",
+    }
+
+    for start, end in date_formats:
+        # 5日分のレスポンスを登録
+        for _ in range(5):
+            httpx_mock.add_response(status_code=200, json={"data": []})
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+            await client.get_eq_valuation_range(start, end)
+        requests = httpx_mock.get_requests()[-5:]
+        actual_dates = {dict(r.url.params).get("date") for r in requests}
+        assert actual_dates == expected_dates, f"format {type(start)}: expected {expected_dates}, got {actual_dates}"
 
 
 # ------------------------------------------------------------------

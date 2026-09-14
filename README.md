@@ -108,7 +108,7 @@ df = await client.get_eq_bars_15minute(code="86970", date_yyyymmdd="2024-01-05")
 
 # バリュエーション指標 (EPS, BPS, PER, PBR, ROE 等)
 df = await client.get_eq_valuation(code="86970", date_yyyymmdd="2024-01-05")
-df = await client.get_eq_valuation_range("20240101", "20240131")
+df = await client.get_eq_valuation_range("20240101", "20240131", cache_dir="/path/to/cache")
 ```
 
 ### 財務情報

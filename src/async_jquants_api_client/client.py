@@ -444,21 +444,61 @@ class JQuantsClientV2:
         self,
         start_dt: DatetimeLike = "20170101",
         end_dt: DatetimeLike | None = None,
+        cache_dir: str = "",
     ) -> pd.DataFrame:
         """
         全銘柄の株式バリュエーション指標を日付範囲指定して取得 (v2: /equities/valuation)
 
+        バリュエーション指標は株価の調整後系列(AdjO/AdjC等)と異なり、後日の株式分割・
+        併合が起きても過去日付の値が遡って書き換わらないため、日付キーで長期キャッシュ
+        できる(fin_summary/fin_details と同じ性質)。
+
         Args:
             start_dt: 取得開始日 (YYYYMMDD or YYYY-MM-DD)
             end_dt: 取得終了日 (YYYYMMDD or YYYY-MM-DD)
+            cache_dir: Parquet形式のキャッシュファイルが存在するディレクトリ (未指定時はキャッシュしない)
         Returns:
             pd.DataFrame: バリュエーション指標データ (Code, Date 列でソート)
                 該当データがない場合も列定義を保持した空の DataFrame を返します。
         """
-        dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
-        buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(*[self.get_eq_valuation(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
-        buff.extend(df for df in results if not df.empty)
+        dates = pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D")
+        cached_files: list[str] = []
+        fetch_dates: list[str] = []
+
+        for d in dates:
+            yyyymmdd = d.strftime("%Y%m%d")
+            cache_file = f"{cache_dir}/{yyyymmdd[:4]}/v2_eq_valuation_{yyyymmdd}.parquet"
+            if cache_dir and os.path.isfile(cache_file):
+                cached_files.append(cache_file)
+            else:
+                fetch_dates.append(yyyymmdd)
+
+        cache_dfs = await asyncio.gather(*[asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
+        buff: list[pd.DataFrame] = list(cache_dfs)
+
+        async def _fetch_and_cache(yyyymmdd: str) -> pd.DataFrame:
+            date_yyyymmdd = f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
+            df = await self.get_eq_valuation(date_yyyymmdd=date_yyyymmdd)
+            if cache_dir:
+                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_eq_valuation_{yyyymmdd}.parquet"
+                await asyncio.to_thread(_write_cache_atomic, cache_path, lambda p: df.to_parquet(p, index=False))
+            return df
+
+        results = await asyncio.gather(*[_fetch_and_cache(d) for d in fetch_dates], return_exceptions=True)
+        failures: list[BaseException] = []
+        for result in results:
+            if isinstance(result, BaseException):
+                failures.append(result)
+                continue
+            if not result.empty:
+                buff.append(result)
+
+        if failures:
+            # 各日のキャッシュは、その日の取得が成功した直後(gather 完了前)に既に
+            # 書き込まれているので、呼び出し側が同じ cache_dir で再試行した際は
+            # 失敗した日だけ再取得できる。
+            raise failures[0]
+
         if not buff:
             # 単発取得 (get_eq_valuation) の空結果と返却契約を揃える
             return pd.DataFrame(columns=constants.EQ_VALUATION_COLUMNS_V2)

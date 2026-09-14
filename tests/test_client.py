@@ -626,6 +626,101 @@ async def test_get_eq_valuation_range_empty_has_expected_columns(httpx_mock: HTT
     assert list(df.columns) == EQ_VALUATION_COLUMNS_V2
 
 
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_uses_cache(tmp_path: Any) -> None:
+    row = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row["Date"] = "2024-01-05"
+    row["Code"] = "5678"
+    row["EPS"] = 120.5
+    df_cached = pd.DataFrame([row])
+    cache_dir = str(tmp_path)
+    os.makedirs(f"{cache_dir}/2024", exist_ok=True)
+    df_cached.to_parquet(f"{cache_dir}/2024/v2_eq_valuation_20240105.parquet", index=False)
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation_range("20240105", "20240105", cache_dir=cache_dir)
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "5678"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_caches_successful_days_despite_one_failure(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """1日でも取得に失敗したら例外を送出するが、成功済みの日は例外の前にキャッシュへ
+    書き込まれ、失われないことを確認する（呼び出し側が同じ cache_dir で再試行した際に
+    失敗した日だけ再取得できるようにするための挙動）"""
+
+    def row(code: str, date: str) -> dict[str, Any]:
+        r = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+        r["Date"] = date
+        r["Code"] = code
+        return r
+
+    eq_valuation_url = "https://api.jquants.com/v2/equities/valuation"
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [row("1111", "2024-01-03")]},
+        url=eq_valuation_url,
+        match_params={"date": "2024-01-03"},
+    )
+    for _ in range(3):  # tenacity retries 429 up to 3 attempts before giving up
+        httpx_mock.add_response(status_code=429, url=eq_valuation_url, match_params={"date": "2024-01-04"})
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [row("2222", "2024-01-05")]},
+        url=eq_valuation_url,
+        match_params={"date": "2024-01-05"},
+    )
+
+    cache_dir = str(tmp_path)
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(JQuantsAPIError):
+            await client.get_eq_valuation_range("20240103", "20240105", cache_dir=cache_dir)
+
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240103.parquet")
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240105.parquet")
+    assert not os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240104.parquet")
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_writes_cache_before_next_date_fetch_starts(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """逐次書き込みの検証: 1日目の取得成功と2日目の取得開始の間で、gather 全体の完了を
+    待たずに1日目のキャッシュが書き込まれていることを確認する。"""
+    row1 = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row1["Date"] = "2024-01-03"
+    row1["Code"] = "1111"
+    row2 = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row2["Date"] = "2024-01-04"
+    row2["Code"] = "2222"
+
+    cache_dir = str(tmp_path)
+    day1_cache_path = f"{cache_dir}/2024/v2_eq_valuation_20240103.parquet"
+    cache_exists_when_day2_request_starts: bool | None = None
+
+    def day1_callback(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=200, json={"data": [row1]})
+
+    def day2_callback(request: httpx.Request) -> httpx.Response:
+        nonlocal cache_exists_when_day2_request_starts
+        cache_exists_when_day2_request_starts = os.path.isfile(day1_cache_path)
+        return httpx.Response(status_code=200, json={"data": [row2]})
+
+    eq_valuation_url = "https://api.jquants.com/v2/equities/valuation"
+    httpx_mock.add_callback(day1_callback, url=eq_valuation_url, match_params={"date": "2024-01-03"})
+    httpx_mock.add_callback(day2_callback, url=eq_valuation_url, match_params={"date": "2024-01-04"})
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation_range("20240103", "20240104", cache_dir=cache_dir)
+
+    assert len(df) == 2
+    assert cache_exists_when_day2_request_starts is True
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240104.parquet")
+
+
 # ------------------------------------------------------------------
 # _write_cache_atomic (fins-summary / fins-details の逐次書き込みで使う共通ヘルパー)
 # ------------------------------------------------------------------

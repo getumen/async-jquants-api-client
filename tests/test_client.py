@@ -721,6 +721,65 @@ async def test_get_eq_valuation_range_writes_cache_before_next_date_fetch_starts
     assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240104.parquet")
 
 
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_caches_empty_result(httpx_mock: HTTPXMock, tmp_path: Any) -> None:
+    """該当データなし(休日・未公開等)の日もキャッシュに書き込まれることを確認する。
+    本番運用では直近日数分のキャッシュを別途パージして再取得可能にする前提のため、
+    空結果もキャッシュ対象とするのが意図した挙動(不要な再取得を避けるため)。"""
+    cache_dir = str(tmp_path)
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation_range("20240105", "20240105", cache_dir=cache_dir)
+    assert df.empty
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240105.parquet")
+
+    # 同じ cache_dir で再度呼び出しても追加のHTTPリクエストは発生しない(キャッシュから返る)
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df2 = await client.get_eq_valuation_range("20240105", "20240105", cache_dir=cache_dir)
+    assert df2.empty
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_date_dtype_stable_with_mixed_empty_days(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """休日等で空レスポンスの日が混在する範囲でも、コールドキャッシュ・ウォームキャッシュの
+    どちらでも Date 列が datetime64 のままであることを確認する(空フレームがキャッシュ経由で
+    object dtype のまま結合に混入しないことのリグレッション検知用)。空フレーム自体は
+    (意図通り)キャッシュされるが、結合結果には混ざらないことを検証する。"""
+    cache_dir = str(tmp_path)
+    eq_valuation_url = "https://api.jquants.com/v2/equities/valuation"
+
+    def row(date: str) -> dict[str, Any]:
+        r = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+        r["Date"] = date
+        r["Code"] = "1234"
+        return r
+
+    # 20240105(平日想定) は実データ、20240106・07(休日想定) は空レスポンス
+    httpx_mock.add_response(
+        status_code=200, json={"data": [row("2024-01-05")]}, url=eq_valuation_url, match_params={"date": "2024-01-05"}
+    )
+    httpx_mock.add_response(
+        status_code=200, json={"data": []}, url=eq_valuation_url, match_params={"date": "2024-01-06"}
+    )
+    httpx_mock.add_response(
+        status_code=200, json={"data": []}, url=eq_valuation_url, match_params={"date": "2024-01-07"}
+    )
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        cold_df = await client.get_eq_valuation_range("20240105", "20240107", cache_dir=cache_dir)
+    assert pd.api.types.is_datetime64_any_dtype(cold_df["Date"])
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240106.parquet")
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240107.parquet")
+
+    # 同じ cache_dir で再度呼び出す(全日程ウォームキャッシュ経由、追加のHTTPリクエストは無し)
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        warm_df = await client.get_eq_valuation_range("20240105", "20240107", cache_dir=cache_dir)
+    assert pd.api.types.is_datetime64_any_dtype(warm_df["Date"])
+    assert len(warm_df) == len(cold_df) == 1
+
+
 # ------------------------------------------------------------------
 # _write_cache_atomic (fins-summary / fins-details の逐次書き込みで使う共通ヘルパー)
 # ------------------------------------------------------------------

@@ -474,7 +474,10 @@ class JQuantsClientV2:
                 fetch_dates.append(yyyymmdd)
 
         cache_dfs = await asyncio.gather(*[asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
-        buff: list[pd.DataFrame] = list(cache_dfs)
+        # 空(該当データなし)なキャッシュファイルは Date 列が object dtype になっており、
+        # 直接取得側 (results ループ) が空フレームを buff に含めないのと非対称になると
+        # 結合結果の dtype がキャッシュの有無で変わってしまうため、ここでも除外する。
+        buff: list[pd.DataFrame] = [df for df in cache_dfs if not df.empty]
 
         async def _fetch_and_cache(yyyymmdd: str) -> pd.DataFrame:
             date_yyyymmdd = f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"

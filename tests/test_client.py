@@ -16,6 +16,7 @@ from async_jquants_api_client.constants import (
     EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2,
     EDINET_MAJOR_SHAREHOLDERS_COLUMNS_V2,
     EQ_BARS_DAILY_COLUMNS_V2,
+    EQ_VALUATION_COLUMNS_V2,
     FIN_SUMMARY_COLUMNS_V2,
     FINS_DIVIDEND_COLUMNS_V2,
 )
@@ -433,6 +434,291 @@ async def test_get_eq_bars_daily_range_requests_all_dates(httpx_mock: HTTPXMock)
     assert len(df) == len(dates)
     requested_dates = [dict(r.url.params)["date"] for r in httpx_mock.get_requests()]
     assert requested_dates == [d.strftime("%Y-%m-%d") for d in dates]
+
+
+# ------------------------------------------------------------------
+# get_eq_valuation
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_params(httpx_mock: HTTPXMock) -> None:
+    cases = [
+        ({"code": "86970"}, {"code": "86970"}),
+        (
+            {"code": "86970", "from_yyyymmdd": "20220101"},
+            {"code": "86970", "from": "20220101"},
+        ),
+        (
+            {"code": "86970", "to_yyyymmdd": "20220131"},
+            {"code": "86970", "to": "20220131"},
+        ),
+        (
+            {"code": "86970", "from_yyyymmdd": "20220101", "to_yyyymmdd": "20220131"},
+            {"code": "86970", "from": "20220101", "to": "20220131"},
+        ),
+        ({"date_yyyymmdd": "20220115"}, {"date": "20220115"}),
+        (
+            {"code": "86970", "date_yyyymmdd": "20220115"},
+            {"code": "86970", "date": "20220115"},
+        ),
+    ]
+    for kwargs, expected_params in cases:
+        httpx_mock.add_response(status_code=200, json={"data": []})
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+            await client.get_eq_valuation(**kwargs)
+        request = httpx_mock.get_requests()[-1]
+        actual = dict(request.url.params)
+        assert actual == expected_params, f"kwargs={kwargs}: expected {expected_params}, got {actual}"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_raises_on_invalid_params() -> None:
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(ValueError):
+            await client.get_eq_valuation()
+        with pytest.raises(ValueError):
+            await client.get_eq_valuation(from_yyyymmdd="20220101")
+        with pytest.raises(ValueError):
+            await client.get_eq_valuation(to_yyyymmdd="20220131")
+        with pytest.raises(ValueError):
+            await client.get_eq_valuation(from_yyyymmdd="20220101", to_yyyymmdd="20220131")
+        with pytest.raises(ValueError):
+            # date_yyyymmdd 指定があっても、from/to は code 併用が必須
+            await client.get_eq_valuation(date_yyyymmdd="20220115", from_yyyymmdd="20220101")
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_returns_dataframe(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "data": [
+                {
+                    "Date": "2023-03-24",
+                    "Code": "86970",
+                    "EPS": 120.5,
+                    "FwdEPS": 130.0,
+                    "BPS": 850.2,
+                    "ROE": 0.145,
+                    "FwdROE": 0.153,
+                    "PER": 17.5,
+                    "FwdPER": 16.2,
+                    "PBR": 2.5,
+                    "MktCap": 2242585.0,
+                },
+                {
+                    "Date": "2023-03-24",
+                    "Code": "13010",
+                    "EPS": None,
+                    "FwdEPS": None,
+                    "BPS": None,
+                    "ROE": None,
+                    "FwdROE": None,
+                    "PER": None,
+                    "FwdPER": None,
+                    "PBR": None,
+                    "MktCap": 30250.0,
+                },
+            ]
+        },
+    )
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation(code="86970", date_yyyymmdd="2023-03-24")
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 2
+    row_86970 = df[df["Code"] == "86970"].iloc[0]
+    assert row_86970["EPS"] == 120.5
+    assert row_86970["PER"] == 17.5
+    assert row_86970["PBR"] == 2.5
+    assert row_86970["Date"] == pd.Timestamp("2023-03-24")
+    row_13010 = df[df["Code"] == "13010"].iloc[0]
+    assert pd.isna(row_13010["EPS"])
+    assert row_13010["MktCap"] == 30250.0
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_empty_response_has_expected_columns(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation(code="86970", date_yyyymmdd="2023-03-24")
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+    assert list(df.columns) == EQ_VALUATION_COLUMNS_V2
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_follows_pagination(httpx_mock: HTTPXMock) -> None:
+    row_86970 = {
+        "Date": "2023-03-24",
+        "Code": "86970",
+        "EPS": 120.5,
+        "FwdEPS": 130.0,
+        "BPS": 850.2,
+        "ROE": 0.145,
+        "FwdROE": 0.153,
+        "PER": 17.5,
+        "FwdPER": 16.2,
+        "PBR": 2.5,
+        "MktCap": 2242585.0,
+    }
+    row_13010 = {**row_86970, "Code": "13010"}
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [row_86970], "pagination_key": "value1.value2."},
+    )
+    httpx_mock.add_response(status_code=200, json={"data": [row_13010]})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation(date_yyyymmdd="2023-03-24")
+    assert len(df) == 2
+    assert list(df["Code"]) == ["13010", "86970"]
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_accepts_various_date_formats(
+    httpx_mock: HTTPXMock,
+) -> None:
+    import pandas as pd
+    from dateutil import tz
+
+    from async_jquants_api_client.client import DatetimeLike
+
+    jst = tz.gettz("Asia/Tokyo")
+    date_formats: list[tuple[DatetimeLike, DatetimeLike]] = [
+        ("20200227", "20200302"),  # 8桁文字列
+        ("2020-02-27", "2020-03-02"),  # ハイフン区切り文字列
+        (datetime(2020, 2, 27), datetime(2020, 3, 2)),  # datetime
+        (
+            datetime(2020, 2, 27, tzinfo=jst),
+            datetime(2020, 3, 2, tzinfo=jst),
+        ),  # datetime with tz
+        (pd.Timestamp("2020-02-27"), pd.Timestamp("2020-03-02")),  # pd.Timestamp
+    ]
+    expected_dates = {
+        "2020-02-27",
+        "2020-02-28",
+        "2020-02-29",
+        "2020-03-01",
+        "2020-03-02",
+    }
+
+    for start, end in date_formats:
+        # 5日分のレスポンスを登録
+        for _ in range(5):
+            httpx_mock.add_response(status_code=200, json={"data": []})
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+            await client.get_eq_valuation_range(start, end)
+        requests = httpx_mock.get_requests()[-5:]
+        actual_dates = {dict(r.url.params).get("date") for r in requests}
+        assert actual_dates == expected_dates, f"format {type(start)}: expected {expected_dates}, got {actual_dates}"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_empty_has_expected_columns(httpx_mock: HTTPXMock) -> None:
+    """全日程が空レスポンスの場合でも EQ_VALUATION_COLUMNS_V2 の列を保持することを確認する
+    (get_eq_valuation 単体の空結果との契約を揃えるリグレッション検知用)"""
+    for _ in range(2):
+        httpx_mock.add_response(status_code=200, json={"data": []})
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation_range("20240105", "20240106")
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+    assert list(df.columns) == EQ_VALUATION_COLUMNS_V2
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_uses_cache(tmp_path: Any) -> None:
+    row: dict[str, Any] = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row["Date"] = "2024-01-05"
+    row["Code"] = "5678"
+    row["EPS"] = 120.5
+    df_cached = pd.DataFrame([row])
+    cache_dir = str(tmp_path)
+    os.makedirs(f"{cache_dir}/2024", exist_ok=True)
+    df_cached.to_parquet(f"{cache_dir}/2024/v2_eq_valuation_20240105.parquet", index=False)
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation_range("20240105", "20240105", cache_dir=cache_dir)
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 1
+    assert df.iloc[0]["Code"] == "5678"
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_caches_successful_days_despite_one_failure(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """1日でも取得に失敗したら例外を送出するが、成功済みの日は例外の前にキャッシュへ
+    書き込まれ、失われないことを確認する（呼び出し側が同じ cache_dir で再試行した際に
+    失敗した日だけ再取得できるようにするための挙動）"""
+
+    def row(code: str, date: str) -> dict[str, Any]:
+        r: dict[str, Any] = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+        r["Date"] = date
+        r["Code"] = code
+        return r
+
+    eq_valuation_url = "https://api.jquants.com/v2/equities/valuation"
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [row("1111", "2024-01-03")]},
+        url=eq_valuation_url,
+        match_params={"date": "2024-01-03"},
+    )
+    for _ in range(3):  # tenacity retries 429 up to 3 attempts before giving up
+        httpx_mock.add_response(status_code=429, url=eq_valuation_url, match_params={"date": "2024-01-04"})
+    httpx_mock.add_response(
+        status_code=200,
+        json={"data": [row("2222", "2024-01-05")]},
+        url=eq_valuation_url,
+        match_params={"date": "2024-01-05"},
+    )
+
+    cache_dir = str(tmp_path)
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(JQuantsAPIError):
+            await client.get_eq_valuation_range("20240103", "20240105", cache_dir=cache_dir)
+
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240103.parquet")
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240105.parquet")
+    assert not os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240104.parquet")
+
+
+@pytest.mark.asyncio
+async def test_get_eq_valuation_range_writes_cache_before_next_date_fetch_starts(
+    httpx_mock: HTTPXMock, tmp_path: Any
+) -> None:
+    """逐次書き込みの検証: 1日目の取得成功と2日目の取得開始の間で、gather 全体の完了を
+    待たずに1日目のキャッシュが書き込まれていることを確認する。"""
+    row1: dict[str, Any] = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row1["Date"] = "2024-01-03"
+    row1["Code"] = "1111"
+    row2: dict[str, Any] = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row2["Date"] = "2024-01-04"
+    row2["Code"] = "2222"
+
+    cache_dir = str(tmp_path)
+    day1_cache_path = f"{cache_dir}/2024/v2_eq_valuation_20240103.parquet"
+    cache_exists_when_day2_request_starts: bool | None = None
+
+    def day1_callback(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=200, json={"data": [row1]})
+
+    def day2_callback(request: httpx.Request) -> httpx.Response:
+        nonlocal cache_exists_when_day2_request_starts
+        cache_exists_when_day2_request_starts = os.path.isfile(day1_cache_path)
+        return httpx.Response(status_code=200, json={"data": [row2]})
+
+    eq_valuation_url = "https://api.jquants.com/v2/equities/valuation"
+    httpx_mock.add_callback(day1_callback, url=eq_valuation_url, match_params={"date": "2024-01-03"})
+    httpx_mock.add_callback(day2_callback, url=eq_valuation_url, match_params={"date": "2024-01-04"})
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        df = await client.get_eq_valuation_range("20240103", "20240104", cache_dir=cache_dir)
+
+    assert len(df) == 2
+    assert cache_exists_when_day2_request_starts is True
+    assert os.path.isfile(f"{cache_dir}/2024/v2_eq_valuation_20240104.parquet")
 
 
 # ------------------------------------------------------------------

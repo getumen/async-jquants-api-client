@@ -375,6 +375,136 @@ class JQuantsClientV2:
         return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
 
     # ------------------------------------------------------------------
+    # eq-valuation (/equities/valuation)
+    # ------------------------------------------------------------------
+    async def get_eq_valuation(
+        self,
+        code: str = "",
+        from_yyyymmdd: str = "",
+        to_yyyymmdd: str = "",
+        date_yyyymmdd: str = "",
+    ) -> pd.DataFrame:
+        """
+        eq-valuation: 株式バリュエーション指標 (v2: /equities/valuation)
+
+        code または date_yyyymmdd のいずれかの指定が必須です (API 仕様)。
+        from_yyyymmdd / to_yyyymmdd で期間を指定する場合は code の指定も必須です。
+        サーバ側は from と to の両方が指定された場合のみ code を必須とするが、
+        仕様書のパラメータ組み合わせに code なしの期間指定が存在せず、
+        code なしで片側だけ指定すると黙って無視されるため、ここでは片側のみの
+        指定でも code を必須として弾く。
+
+        Args:
+            code: 銘柄コード (5桁 or 4桁)
+            from_yyyymmdd: 期間開始日 (YYYYMMDD or YYYY-MM-DD)
+            to_yyyymmdd: 期間終了日 (YYYYMMDD or YYYY-MM-DD)
+            date_yyyymmdd: 特定日付 (YYYYMMDD or YYYY-MM-DD)
+        Returns:
+            pd.DataFrame: バリュエーション指標データ (v2のフィールド名で返却)
+        """
+        if not code and not date_yyyymmdd:
+            raise ValueError("code または date_yyyymmdd のいずれかを指定してください。")
+        if (from_yyyymmdd or to_yyyymmdd) and not code:
+            raise ValueError("from_yyyymmdd / to_yyyymmdd を指定する場合は code も指定してください。")
+
+        params: dict[str, Any] = {}
+        if code:
+            params["code"] = code
+        if date_yyyymmdd:
+            params["date"] = date_yyyymmdd
+        else:
+            if from_yyyymmdd:
+                params["from"] = from_yyyymmdd
+            if to_yyyymmdd:
+                params["to"] = to_yyyymmdd
+
+        all_data = [
+            item
+            async for item in self._paginate(
+                "/equities/valuation",
+                params=params,
+            )
+        ]
+
+        if not all_data:
+            return pd.DataFrame(columns=constants.EQ_VALUATION_COLUMNS_V2)
+
+        df = pd.DataFrame.from_records(all_data)
+        if "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+        sort_cols = [c for c in ["Code", "Date"] if c in df.columns]
+        if sort_cols:
+            df.sort_values(sort_cols, inplace=True)
+
+        cols = constants.EQ_VALUATION_COLUMNS_V2
+        return df[cols].reset_index(drop=True)
+
+    async def get_eq_valuation_range(
+        self,
+        start_dt: DatetimeLike = "20170101",
+        end_dt: DatetimeLike | None = None,
+        cache_dir: str = "",
+    ) -> pd.DataFrame:
+        """
+        全銘柄の株式バリュエーション指標を日付範囲指定して取得 (v2: /equities/valuation)
+
+        バリュエーション指標は株価の調整後系列(AdjO/AdjC等)と異なり、後日の株式分割・
+        併合が起きても過去日付の値が遡って書き換わらないため、日付キーで長期キャッシュ
+        できる(fin_summary/fin_details と同じ性質)。
+
+        Args:
+            start_dt: 取得開始日 (YYYYMMDD or YYYY-MM-DD)
+            end_dt: 取得終了日 (YYYYMMDD or YYYY-MM-DD)
+            cache_dir: Parquet形式のキャッシュファイルが存在するディレクトリ (未指定時はキャッシュしない)
+        Returns:
+            pd.DataFrame: バリュエーション指標データ (Code, Date 列でソート)
+                該当データがない場合も列定義を保持した空の DataFrame を返します。
+        """
+        dates = pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D")
+        cached_files: list[str] = []
+        fetch_dates: list[str] = []
+
+        for d in dates:
+            yyyymmdd = d.strftime("%Y%m%d")
+            cache_file = f"{cache_dir}/{yyyymmdd[:4]}/v2_eq_valuation_{yyyymmdd}.parquet"
+            if cache_dir and os.path.isfile(cache_file):
+                cached_files.append(cache_file)
+            else:
+                fetch_dates.append(yyyymmdd)
+
+        cache_dfs = await asyncio.gather(*[asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
+        buff: list[pd.DataFrame] = list(cache_dfs)
+
+        async def _fetch_and_cache(yyyymmdd: str) -> pd.DataFrame:
+            date_yyyymmdd = f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
+            df = await self.get_eq_valuation(date_yyyymmdd=date_yyyymmdd)
+            if cache_dir:
+                cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_eq_valuation_{yyyymmdd}.parquet"
+                await asyncio.to_thread(_write_cache_atomic, cache_path, lambda p: df.to_parquet(p, index=False))
+            return df
+
+        results = await asyncio.gather(*[_fetch_and_cache(d) for d in fetch_dates], return_exceptions=True)
+        failures: list[BaseException] = []
+        for result in results:
+            if isinstance(result, BaseException):
+                failures.append(result)
+                continue
+            if not result.empty:
+                buff.append(result)
+
+        if failures:
+            # 各日のキャッシュは、その日の取得が成功した直後(gather 完了前)に既に
+            # 書き込まれているので、呼び出し側が同じ cache_dir で再試行した際は
+            # 失敗した日だけ再取得できる。
+            raise failures[0]
+
+        if not buff:
+            # 単発取得 (get_eq_valuation) の空結果と返却契約を揃える
+            return pd.DataFrame(columns=constants.EQ_VALUATION_COLUMNS_V2)
+        return pd.concat(buff).sort_values(["Code", "Date"]).reset_index(drop=True)
+
+    # ------------------------------------------------------------------
     # eq-bars-daily-am (/equities/bars/daily/am)
     # ------------------------------------------------------------------
     async def get_eq_bars_daily_am(self, code: str = "") -> pd.DataFrame:

@@ -763,6 +763,22 @@ EQ_BARS_DAILY_COLUMNS_V2 = [
     "ExRT",
 ]
 
+# ref. ja https://jpx-jquants.com/ja/spec/eq-valuation
+# ref. en https://jpx-jquants.com/en/spec/eq-valuation
+EQ_VALUATION_COLUMNS_V2 = [
+    "Date",
+    "Code",
+    "EPS",
+    "FwdEPS",
+    "BPS",
+    "ROE",
+    "FwdROE",
+    "PER",
+    "FwdPER",
+    "PBR",
+    "MktCap",
+]
+
 # ref. ja https://jpx-jquants.com/ja/spec/eq-bars-minute
 # ref. en https://jpx-jquants.com/en/spec/eq-bars-minute
 EQ_BARS_MINUTE_COLUMNS_V2 = [

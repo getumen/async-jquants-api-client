@@ -628,7 +628,7 @@ async def test_get_eq_valuation_range_empty_has_expected_columns(httpx_mock: HTT
 
 @pytest.mark.asyncio
 async def test_get_eq_valuation_range_uses_cache(tmp_path: Any) -> None:
-    row = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row: dict[str, Any] = {col: None for col in EQ_VALUATION_COLUMNS_V2}
     row["Date"] = "2024-01-05"
     row["Code"] = "5678"
     row["EPS"] = 120.5
@@ -653,7 +653,7 @@ async def test_get_eq_valuation_range_caches_successful_days_despite_one_failure
     失敗した日だけ再取得できるようにするための挙動）"""
 
     def row(code: str, date: str) -> dict[str, Any]:
-        r = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+        r: dict[str, Any] = {col: None for col in EQ_VALUATION_COLUMNS_V2}
         r["Date"] = date
         r["Code"] = code
         return r
@@ -690,10 +690,10 @@ async def test_get_eq_valuation_range_writes_cache_before_next_date_fetch_starts
 ) -> None:
     """逐次書き込みの検証: 1日目の取得成功と2日目の取得開始の間で、gather 全体の完了を
     待たずに1日目のキャッシュが書き込まれていることを確認する。"""
-    row1 = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row1: dict[str, Any] = {col: None for col in EQ_VALUATION_COLUMNS_V2}
     row1["Date"] = "2024-01-03"
     row1["Code"] = "1111"
-    row2 = {col: None for col in EQ_VALUATION_COLUMNS_V2}
+    row2: dict[str, Any] = {col: None for col in EQ_VALUATION_COLUMNS_V2}
     row2["Date"] = "2024-01-04"
     row2["Code"] = "2222"
 

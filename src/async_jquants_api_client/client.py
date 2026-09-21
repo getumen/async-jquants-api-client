@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -71,6 +71,87 @@ def _write_cache_atomic(path: str, write_to: Callable[[str], None]) -> None:
             # チェックと削除の間にファイルが消える TOCTOU も避けられる。
             pass
         raise
+
+
+async def _gather_with_cancel(
+    coros: list[Coroutine[Any, Any, pd.DataFrame]],
+    cancel_on: tuple[type[BaseException], ...],
+    protect: "set[asyncio.Task[pd.DataFrame]] | None" = None,
+) -> list[pd.DataFrame | BaseException]:
+    """日付ごとの取得を並行実行し、`cancel_on` に該当する例外が出たら残りをキャンセルする。
+
+    `asyncio.gather` は途中の1件が失敗しても他の実行中タスクをキャンセルしないため、
+    呼び出し元が例外を受け取って諦めた後もリクエストが発行され続け、レートリミット枠を
+    消費し続ける。ここでは失敗を検知した時点で未完了のタスクを止める。
+
+    キャンセルされたタスクは `CancelledError` として結果に入る。全タスクの完了を待って
+    から返すので、この関数が返った時点で実行中のタスクは残らない。例外は結果リストに
+    そのまま入れて返し、投げ直すかどうかは呼び出し側が決める。
+
+    `protect` に入っているタスクはキャンセルしない。`asyncio.to_thread` で動くキャッシュ
+    書き込みのように、キャンセルしても裏のスレッドを止められず、成否を観測できなくなる
+    だけの区間を保護するために使う。
+    """
+    tasks = [asyncio.ensure_future(coro) for coro in coros]
+
+    def _cancel_siblings(finished: "asyncio.Task[pd.DataFrame]") -> None:
+        if finished.cancelled():
+            return
+        exc = finished.exception()
+        if exc is None or not isinstance(exc, cancel_on):
+            return
+        for task in tasks:
+            if task is finished or task.done():
+                continue
+            if protect is not None and task in protect:
+                continue
+            task.cancel()
+
+    for task in tasks:
+        task.add_done_callback(_cancel_siblings)
+
+    return await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _first_failure(results: list[pd.DataFrame | BaseException]) -> BaseException | None:
+    """キャンセルの波及 (`CancelledError`) を除いた最初の例外を返す。
+
+    `CancelledError` は失敗の原因ではなく結果なので、それを投げ直すと本当の失敗理由が
+    呼び出し元に伝わらなくなる。
+    """
+    for result in results:
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            return result
+    return None
+
+
+def _unwrap_or_raise(results: list[pd.DataFrame | BaseException]) -> list[pd.DataFrame]:
+    """失敗があれば投げ直し、無ければ DataFrame だけを返す。"""
+    failure = _first_failure(results)
+    if failure is not None:
+        raise failure
+    return [result for result in results if isinstance(result, pd.DataFrame)]
+
+
+async def _gather_dates_fail_fast(coros: list[Coroutine[Any, Any, pd.DataFrame]]) -> list[pd.DataFrame]:
+    """1件でも失敗したら残りをキャンセルして、その例外を投げ直す。
+
+    キャッシュを持たない `*_range` 用。失敗した時点で戻り値は捨てられるので、残りを
+    走らせ続けても結果は使われず、レートリミット枠だけを消費する。
+    """
+    return _unwrap_or_raise(await _gather_with_cancel(coros, cancel_on=(Exception,)))
+
+
+async def _gather_cache_reads(coros: list[Coroutine[Any, Any, pd.DataFrame]]) -> list[pd.DataFrame]:
+    """キャッシュ読み込みを並行実行し、1件失敗しても全件の完了を待ってから投げ直す。
+
+    読み込みは `asyncio.to_thread` で動くため、キャンセルしてもスレッドは止まらない。
+    待たずに抜けると range メソッドが返った後もスレッドが走り続け、そこで起きた例外は
+    どこにも報告されないまま消える。ローカルディスク I/O でレートリミット枠も消費
+    しないので、ここは打ち切らずに全件を待つ。
+    """
+    results: list[pd.DataFrame | BaseException] = await asyncio.gather(*coros, return_exceptions=True)
+    return _unwrap_or_raise(results)
 
 
 def _aggregate_bars_n_minute(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
@@ -368,7 +449,9 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(*[self.get_eq_bars_daily(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        results = await _gather_dates_fail_fast(
+            [self.get_eq_bars_daily(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
         buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
@@ -473,22 +556,34 @@ class JQuantsClientV2:
             else:
                 fetch_dates.append(yyyymmdd)
 
-        cache_dfs = await asyncio.gather(*[asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
+        cache_dfs = await _gather_cache_reads([asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
         buff: list[pd.DataFrame] = list(cache_dfs)
+        # キャッシュ書き込みに入ったタスク。書き込みは `asyncio.to_thread` で動くため
+        # キャンセルしても裏のスレッドは止まらず、成否だけが観測できなくなる
+        writing: set[asyncio.Task[pd.DataFrame]] = set()
 
         async def _fetch_and_cache(yyyymmdd: str) -> pd.DataFrame:
             date_yyyymmdd = f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
             df = await self.get_eq_valuation(date_yyyymmdd=date_yyyymmdd)
             if cache_dir:
+                current = asyncio.current_task()
+                if current is not None:
+                    writing.add(current)
                 cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_eq_valuation_{yyyymmdd}.parquet"
                 await asyncio.to_thread(_write_cache_atomic, cache_path, lambda p: df.to_parquet(p, index=False))
             return df
 
-        results = await asyncio.gather(*[_fetch_and_cache(d) for d in fetch_dates], return_exceptions=True)
+        results = await _gather_with_cancel(
+            [_fetch_and_cache(d) for d in fetch_dates],
+            cancel_on=(JQuantsAuthError,),
+            protect=writing,
+        )
         failures: list[BaseException] = []
         for result in results:
             if isinstance(result, BaseException):
-                failures.append(result)
+                # キャンセルは失敗の波及であって原因ではないので、投げ直す候補にしない
+                if not isinstance(result, asyncio.CancelledError):
+                    failures.append(result)
                 continue
             if not result.empty:
                 buff.append(result)
@@ -771,25 +866,37 @@ class JQuantsClientV2:
             else:
                 fetch_dates.append(yyyymmdd)
 
-        cache_dfs = await asyncio.gather(
-            *[asyncio.to_thread(_read_fin_summary_cache, path, _DATE_COLS) for path in cached_files]
+        cache_dfs = await _gather_cache_reads(
+            [asyncio.to_thread(_read_fin_summary_cache, path, _DATE_COLS) for path in cached_files]
         )
         buff: list[pd.DataFrame] = list(cache_dfs)
+        # キャッシュ書き込みに入ったタスク。書き込みは `asyncio.to_thread` で動くため
+        # キャンセルしても裏のスレッドは止まらず、成否だけが観測できなくなる
+        writing: set[asyncio.Task[pd.DataFrame]] = set()
 
         async def _fetch_and_cache(yyyymmdd: str) -> pd.DataFrame:
             df = await self.get_fin_summary(date_yyyymmdd=yyyymmdd)
             if cache_dir:
+                current = asyncio.current_task()
+                if current is not None:
+                    writing.add(current)
                 cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_summary_{yyyymmdd}.csv.gz"
                 await asyncio.to_thread(
                     _write_cache_atomic, cache_path, lambda p: df.to_csv(p, index=False, compression="gzip")
                 )
             return df
 
-        results = await asyncio.gather(*[_fetch_and_cache(d) for d in fetch_dates], return_exceptions=True)
+        results = await _gather_with_cancel(
+            [_fetch_and_cache(d) for d in fetch_dates],
+            cancel_on=(JQuantsAuthError,),
+            protect=writing,
+        )
         failures: list[BaseException] = []
         for result in results:
             if isinstance(result, BaseException):
-                failures.append(result)
+                # キャンセルは失敗の波及であって原因ではないので、投げ直す候補にしない
+                if not isinstance(result, asyncio.CancelledError):
+                    failures.append(result)
                 continue
             if not result.empty:
                 buff.append(result)
@@ -867,21 +974,33 @@ class JQuantsClientV2:
             else:
                 fetch_dates.append(yyyymmdd)
 
-        cache_dfs = await asyncio.gather(*[asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
+        cache_dfs = await _gather_cache_reads([asyncio.to_thread(pd.read_parquet, path) for path in cached_files])
         buff: list[pd.DataFrame] = list(cache_dfs)
+        # キャッシュ書き込みに入ったタスク。書き込みは `asyncio.to_thread` で動くため
+        # キャンセルしても裏のスレッドは止まらず、成否だけが観測できなくなる
+        writing: set[asyncio.Task[pd.DataFrame]] = set()
 
         async def _fetch_and_cache(yyyymmdd: str) -> pd.DataFrame:
             df = await self.get_fin_details(date_yyyymmdd=yyyymmdd)
             if cache_dir:
+                current = asyncio.current_task()
+                if current is not None:
+                    writing.add(current)
                 cache_path = f"{cache_dir}/{yyyymmdd[:4]}/v2_fin_details_{yyyymmdd}.parquet"
                 await asyncio.to_thread(_write_cache_atomic, cache_path, lambda p: df.to_parquet(p, index=False))
             return df
 
-        results = await asyncio.gather(*[_fetch_and_cache(d) for d in fetch_dates], return_exceptions=True)
+        results = await _gather_with_cancel(
+            [_fetch_and_cache(d) for d in fetch_dates],
+            cancel_on=(JQuantsAuthError,),
+            protect=writing,
+        )
         failures: list[BaseException] = []
         for result in results:
             if isinstance(result, BaseException):
-                failures.append(result)
+                # キャンセルは失敗の波及であって原因ではないので、投げ直す候補にしない
+                if not isinstance(result, asyncio.CancelledError):
+                    failures.append(result)
                 continue
             if not result.empty:
                 buff.append(result)
@@ -956,7 +1075,9 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(*[self.get_fin_dividend(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        results = await _gather_dates_fail_fast(
+            [self.get_fin_dividend(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
         buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
@@ -1044,7 +1165,9 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(*[self.get_mkt_short_ratio(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        results = await _gather_dates_fail_fast(
+            [self.get_mkt_short_ratio(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
         buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
@@ -1109,8 +1232,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[self.get_mkt_short_sale_report(disclosed_date=d.strftime("%Y-%m-%d")) for d in dates]
+        results = await _gather_dates_fail_fast(
+            [self.get_mkt_short_sale_report(disclosed_date=d.strftime("%Y-%m-%d")) for d in dates]
         )
         buff.extend(df for df in results if not df.empty)
         if not buff:
@@ -1171,8 +1294,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[self.get_mkt_margin_interest(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        results = await _gather_dates_fail_fast(
+            [self.get_mkt_margin_interest(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
         )
         buff.extend(df for df in results if not df.empty)
         if not buff:
@@ -1233,8 +1356,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[self.get_mkt_margin_alert(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        results = await _gather_dates_fail_fast(
+            [self.get_mkt_margin_alert(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
         )
         buff.extend(df for df in results if not df.empty)
         if not buff:
@@ -1299,8 +1422,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[self.get_edinet_major_shareholders(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        results = await _gather_dates_fail_fast(
+            [self.get_edinet_major_shareholders(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
         )
         buff.extend(df for df in results if not df.empty)
         if not buff:
@@ -1366,8 +1489,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[self.get_edinet_cross_shareholdings(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        results = await _gather_dates_fail_fast(
+            [self.get_edinet_cross_shareholdings(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
         )
         buff.extend(df for df in results if not df.empty)
         if not buff:
@@ -1434,8 +1557,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[self.get_edinet_large_volume_shareholders(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        results = await _gather_dates_fail_fast(
+            [self.get_edinet_large_volume_shareholders(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
         )
         buff.extend(df for df in results if not df.empty)
         if not buff:
@@ -1499,7 +1622,9 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(*[self.get_mkt_breakdown(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates])
+        results = await _gather_dates_fail_fast(
+            [self.get_mkt_breakdown(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        )
         buff.extend(df for df in results if not df.empty)
         if not buff:
             return pd.DataFrame()
@@ -1720,8 +1845,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[
+        results = await _gather_dates_fail_fast(
+            [
                 self.get_drv_bars_daily_fut(
                     date_yyyymmdd=d.strftime("%Y-%m-%d"),
                     category=category,
@@ -1748,8 +1873,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[
+        results = await _gather_dates_fail_fast(
+            [
                 self.get_drv_bars_daily_opt(
                     date_yyyymmdd=d.strftime("%Y-%m-%d"),
                     category=category,
@@ -1774,8 +1899,8 @@ class JQuantsClientV2:
         """
         dates = list(pd.date_range(start_dt, end_dt or datetime.now().strftime("%Y%m%d"), freq="D"))
         buff: list[pd.DataFrame] = []
-        results = await asyncio.gather(
-            *[self.get_drv_bars_daily_opt_225(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
+        results = await _gather_dates_fail_fast(
+            [self.get_drv_bars_daily_opt_225(date_yyyymmdd=d.strftime("%Y-%m-%d")) for d in dates]
         )
         buff.extend(df for df in results if not df.empty)
         if not buff:

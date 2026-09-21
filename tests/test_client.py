@@ -1,4 +1,6 @@
+import asyncio
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1847,3 +1849,140 @@ async def test_get_bulk_returns_url(httpx_mock: HTTPXMock) -> None:
     assert url == expected_url
     request = httpx_mock.get_requests()[-1]
     assert dict(request.url.params) == {"key": "equities/master/20240101.csv.gz"}
+
+
+# ------------------------------------------------------------------
+# *_range の失敗時キャンセル (Issue #16)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_range_cancels_remaining_requests_on_failure(httpx_mock: HTTPXMock) -> None:
+    """1日でも失敗したら、残りの日付のリクエストは発行されない。
+
+    失敗後も孤児タスクが走り続けると、呼び出し元が例外を受け取って諦めた後も
+    レートリミット枠を消費し続ける (Issue #16)。
+    """
+    httpx_mock.add_response(status_code=404)
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        before = asyncio.all_tasks()
+        with pytest.raises(JQuantsAPIError):
+            await client.get_eq_bars_daily_range("20240101", "20240106")  # 6日分
+        leaked = asyncio.all_tasks() - before
+        assert leaked == set(), f"キャンセルされていないタスクが残った: {leaked}"
+        assert len(httpx_mock.get_requests()) < 6
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_cached_range_stops_fetching_on_auth_error(httpx_mock: HTTPXMock, tmp_path: Path) -> None:
+    """認証エラーが出たら、残りの日付は取りに行かない。
+
+    キャッシュ系は日ごとの書き込みでレジュームを前進させるため、取得失敗が出ても
+    残りを走らせ続ける設計だが、認証エラーだけは続けても絶対に成功しないので
+    レートリミット枠を捨てるだけになる。
+    """
+    httpx_mock.add_response(status_code=403)
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        before = asyncio.all_tasks()
+        with pytest.raises(JQuantsAuthError):
+            await client.get_eq_valuation_range("20240101", "20240110", cache_dir=str(tmp_path))  # 10日分
+        leaked = asyncio.all_tasks() - before
+        assert leaked == set(), f"キャンセルされていないタスクが残った: {leaked}"
+        assert len(httpx_mock.get_requests()) < 10
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_cached_range_keeps_fetching_after_non_auth_failure(httpx_mock: HTTPXMock, tmp_path: Path) -> None:
+    """認証以外の失敗では残りの日付を取り切り、成功した日のキャッシュを残す。
+
+    呼び出し元は同じ cache_dir で再実行して失敗した日だけ取り直すので、1回の失敗で
+    キャッシュの蓄積を止めてしまうと再取得の回数が増える。
+    """
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        date = dict(request.url.params)["date"]
+        if date == "2024-01-02":
+            return httpx.Response(status_code=404)
+        record: dict[str, Any] = dict.fromkeys(EQ_VALUATION_COLUMNS_V2)
+        record.update({"Code": "1234", "Date": date})
+        return httpx.Response(status_code=200, json={"data": [record]})
+
+    httpx_mock.add_callback(_respond)
+
+    async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+        with pytest.raises(JQuantsAPIError):
+            await client.get_eq_valuation_range("20240101", "20240104", cache_dir=str(tmp_path))
+
+    assert sorted(p.name for p in (tmp_path / "2024").iterdir()) == [
+        "v2_eq_valuation_20240101.parquet",
+        "v2_eq_valuation_20240103.parquet",
+        "v2_eq_valuation_20240104.parquet",
+    ]
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+@pytest.mark.asyncio
+async def test_cached_range_waits_for_in_flight_cache_write(httpx_mock: HTTPXMock, tmp_path: Path) -> None:
+    """認証エラーでキャンセルしても、書き込み中のキャッシュは最後まで待つ。
+
+    キャッシュ書き込みは `asyncio.to_thread` で動くのでキャンセルしても裏のスレッドは
+    止まらない。ここでキャンセルすると、書き込みが成功したかどうかを誰も観測できない
+    まま range メソッドが返ってしまい、「キャッシュがあれば次回スキップできる」という
+    レジュームの前提が崩れる。
+    """
+
+    def _slow_write(path: str, write_to: Any) -> None:
+        time.sleep(0.3)
+        _write_cache_atomic(path, write_to)
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        date = dict(request.url.params)["date"]
+        if date == "2024-01-02":
+            return httpx.Response(status_code=403)
+        record: dict[str, Any] = dict.fromkeys(EQ_VALUATION_COLUMNS_V2)
+        record.update({"Code": "1234", "Date": date})
+        return httpx.Response(status_code=200, json={"data": [record]})
+
+    httpx_mock.add_callback(_respond)
+
+    with patch("async_jquants_api_client.client._write_cache_atomic", _slow_write):
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+            with pytest.raises(JQuantsAuthError):
+                await client.get_eq_valuation_range("20240101", "20240102", cache_dir=str(tmp_path))
+            assert (tmp_path / "2024" / "v2_eq_valuation_20240101.parquet").exists()
+
+
+@pytest.mark.asyncio
+async def test_cached_range_waits_for_all_cache_reads_on_failure(tmp_path: Path) -> None:
+    """キャッシュ読み込みが1件失敗しても、残りの読み込みを待ってから例外を投げる。
+
+    読み込みは `asyncio.to_thread` で動くのでキャンセルしても止まらない。待たずに
+    抜けると、range メソッドが返った後もスレッドが走り続け、そこで起きた例外は
+    どこにも報告されないまま消える。
+    """
+    year_dir = tmp_path / "2024"
+    year_dir.mkdir()
+    for day in range(1, 7):
+        (year_dir / f"v2_eq_valuation_2024010{day}.parquet").touch()
+
+    finished = 0
+    real_read_parquet = pd.read_parquet
+
+    def _read(path: str) -> pd.DataFrame:
+        nonlocal finished
+        if path.endswith("20240102.parquet"):
+            raise ValueError("壊れたキャッシュ")
+        time.sleep(0.3)
+        finished += 1
+        return real_read_parquet(path)
+
+    with patch("async_jquants_api_client.client.pd.read_parquet", _read):
+        async with JQuantsClientV2(api_key="dummy", plan=Plan.PREMIUM) as client:
+            with pytest.raises(ValueError):
+                await client.get_eq_valuation_range("20240101", "20240106", cache_dir=str(tmp_path))
+            assert finished == 5, f"読み込み中のスレッドを待たずに抜けた (finished={finished})"

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,12 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from async_jquants_api_client import JQuantsAPIError, JQuantsAuthError, JQuantsClientV2, Plan
-from async_jquants_api_client.client import _aggregate_bars_n_minute, _write_cache_atomic
+from async_jquants_api_client.client import (
+    _aggregate_bars_n_minute,
+    _gather_with_cancel,
+    _unwrap_or_raise,
+    _write_cache_atomic,
+)
 from async_jquants_api_client.constants import (
     EDINET_CROSS_SHAREHOLDINGS_COLUMNS_V2,
     EDINET_LARGE_VOLUME_SHAREHOLDERS_COLUMNS_V2,
@@ -1971,6 +1977,8 @@ async def test_cached_range_waits_for_all_cache_reads_on_failure(tmp_path: Path)
         (year_dir / f"v2_eq_valuation_2024010{day}.parquet").touch()
 
     finished = 0
+    # 読み込みはワーカースレッドで並行に走るので、カウンタの更新はロックで守る
+    finished_lock = threading.Lock()
     real_read_parquet = pd.read_parquet
 
     def _read(path: str) -> pd.DataFrame:
@@ -1978,7 +1986,8 @@ async def test_cached_range_waits_for_all_cache_reads_on_failure(tmp_path: Path)
         if path.endswith("20240102.parquet"):
             raise ValueError("壊れたキャッシュ")
         time.sleep(0.3)
-        finished += 1
+        with finished_lock:
+            finished += 1
         return real_read_parquet(path)
 
     with patch("async_jquants_api_client.client.pd.read_parquet", _read):
@@ -1986,3 +1995,23 @@ async def test_cached_range_waits_for_all_cache_reads_on_failure(tmp_path: Path)
             with pytest.raises(ValueError):
                 await client.get_eq_valuation_range("20240101", "20240106", cache_dir=str(tmp_path))
             assert finished == 5, f"読み込み中のスレッドを待たずに抜けた (finished={finished})"
+
+
+@pytest.mark.asyncio
+async def test_gather_treats_foreign_cancellation_as_failure() -> None:
+    """自分が起こしたキャンセル以外の `CancelledError` は失敗として投げ直す。
+
+    型だけで一括して無視すると、取得できなかった日を黙って落とした DataFrame を
+    返してしまう。欠損に気づけないまま後段の計算に流れるのが一番まずい。
+    """
+
+    async def _ok() -> pd.DataFrame:
+        return pd.DataFrame({"Code": ["1234"]})
+
+    async def _cancelled_by_someone_else() -> pd.DataFrame:
+        raise asyncio.CancelledError("外部要因によるキャンセル")
+
+    results = await _gather_with_cancel([_ok(), _cancelled_by_someone_else()], cancel_on=(Exception,))
+
+    with pytest.raises(asyncio.CancelledError):
+        _unwrap_or_raise(results)

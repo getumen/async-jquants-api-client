@@ -73,6 +73,19 @@ def _write_cache_atomic(path: str, write_to: Callable[[str], None]) -> None:
         raise
 
 
+class _CancelledByFailure(BaseException):
+    """兄弟タスクの失敗を受けて `_gather_with_cancel` がキャンセルしたことを表す内部マーカー。
+
+    `CancelledError` を型だけで「失敗ではない」と判断すると、こちらが仕掛けたもの以外の
+    `CancelledError` まで無視してしまい、取得できなかった日が黙って欠けた結果を返すことに
+    なる。自分が cancel したタスクの結果だけをこのマーカーに差し替えることで、素性の
+    分からない `CancelledError` は失敗として扱える。
+    """
+
+
+_CANCELLED_BY_FAILURE = _CancelledByFailure()
+
+
 async def _gather_with_cancel(
     coros: list[Coroutine[Any, Any, pd.DataFrame]],
     cancel_on: tuple[type[BaseException], ...],
@@ -93,6 +106,7 @@ async def _gather_with_cancel(
     だけの区間を保護するために使う。
     """
     tasks = [asyncio.ensure_future(coro) for coro in coros]
+    cancelled_by_us: set[asyncio.Task[pd.DataFrame]] = set()
 
     def _cancel_siblings(finished: "asyncio.Task[pd.DataFrame]") -> None:
         if finished.cancelled():
@@ -105,22 +119,28 @@ async def _gather_with_cancel(
                 continue
             if protect is not None and task in protect:
                 continue
-            task.cancel()
+            if task.cancel():
+                cancelled_by_us.add(task)
 
     for task in tasks:
         task.add_done_callback(_cancel_siblings)
 
-    return await asyncio.gather(*tasks, return_exceptions=True)
+    results: list[pd.DataFrame | BaseException] = await asyncio.gather(*tasks, return_exceptions=True)
+    return [
+        _CANCELLED_BY_FAILURE if task in cancelled_by_us and isinstance(result, asyncio.CancelledError) else result
+        for task, result in zip(tasks, results)
+    ]
 
 
 def _first_failure(results: list[pd.DataFrame | BaseException]) -> BaseException | None:
-    """キャンセルの波及 (`CancelledError`) を除いた最初の例外を返す。
+    """こちらが仕掛けたキャンセルを除いた最初の例外を返す。
 
-    `CancelledError` は失敗の原因ではなく結果なので、それを投げ直すと本当の失敗理由が
-    呼び出し元に伝わらなくなる。
+    自分が起こしたキャンセルは失敗の原因ではなく結果なので、それを投げ直すと本当の
+    失敗理由が呼び出し元に伝わらなくなる。逆に、素性の分からない `CancelledError` は
+    失敗として扱う。無視すると、その日が欠けたことに誰も気づけない。
     """
     for result in results:
-        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+        if isinstance(result, BaseException) and not isinstance(result, _CancelledByFailure):
             return result
     return None
 
@@ -581,8 +601,9 @@ class JQuantsClientV2:
         failures: list[BaseException] = []
         for result in results:
             if isinstance(result, BaseException):
-                # キャンセルは失敗の波及であって原因ではないので、投げ直す候補にしない
-                if not isinstance(result, asyncio.CancelledError):
+                # こちらが仕掛けたキャンセルは失敗の波及であって原因ではないので、
+                # 投げ直す候補にしない
+                if not isinstance(result, _CancelledByFailure):
                     failures.append(result)
                 continue
             if not result.empty:
@@ -894,8 +915,9 @@ class JQuantsClientV2:
         failures: list[BaseException] = []
         for result in results:
             if isinstance(result, BaseException):
-                # キャンセルは失敗の波及であって原因ではないので、投げ直す候補にしない
-                if not isinstance(result, asyncio.CancelledError):
+                # こちらが仕掛けたキャンセルは失敗の波及であって原因ではないので、
+                # 投げ直す候補にしない
+                if not isinstance(result, _CancelledByFailure):
                     failures.append(result)
                 continue
             if not result.empty:
@@ -998,8 +1020,9 @@ class JQuantsClientV2:
         failures: list[BaseException] = []
         for result in results:
             if isinstance(result, BaseException):
-                # キャンセルは失敗の波及であって原因ではないので、投げ直す候補にしない
-                if not isinstance(result, asyncio.CancelledError):
+                # こちらが仕掛けたキャンセルは失敗の波及であって原因ではないので、
+                # 投げ直す候補にしない
+                if not isinstance(result, _CancelledByFailure):
                     failures.append(result)
                 continue
             if not result.empty:
